@@ -90,6 +90,22 @@ export class ModuleRegistryStore {
     this.moduleEnabled.set(current);
   }
 
+  setModuleEnabled(moduleIdx: number, enabled: boolean): void {
+    const current = { ...this.moduleEnabled() };
+    current[moduleIdx] = enabled;
+    this.moduleEnabled.set(current);
+
+    if (enabled) {
+      const mod = this.modules().find(m => m.idx === moduleIdx);
+      if (mod) {
+        const ge = [...this.groupEnabled()];
+        ge[mod.group] = true;
+        this.groupEnabled.set(ge);
+        this.setGroupExpanded(mod.group, true);
+      }
+    }
+  }
+
   selectModuleForEditing(idx: number): void {
     this.selectedModuleIdx.set(idx);
   }

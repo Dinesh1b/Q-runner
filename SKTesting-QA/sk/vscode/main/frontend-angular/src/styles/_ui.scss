@@ -89,7 +89,8 @@ body {
   transform: translateY(-2px); 
 }
 
-.card-head {
+.card-head,
+.card-hd {
   display: flex; align-items: center; justify-content: space-between;
   padding: 11px 16px;
   border-bottom: 1px solid var(--glass-border-dim);
@@ -199,8 +200,10 @@ option { background: var(--bg-body); color: var(--t0); }
   cursor: pointer; transition: var(--trans); box-shadow: var(--shadow-sm);
 }
 .tgl-row:hover { background: var(--glass-2); box-shadow: var(--shadow-md); border-color: rgba(244,63,94,0.25); }
-.tgl-row.on { border-color: var(--tgl-active-border); background: var(--tgl-active-bg); }
-.tgl-row.on:hover { border-color: rgba(16,185,129,0.45); background: rgba(16,185,129,0.14); }
+.tgl-row.on,
+.tgl-row:has(input:checked) { border-color: var(--tgl-active-border); background: var(--tgl-active-bg); }
+.tgl-row.on:hover,
+.tgl-row:has(input:checked):hover { border-color: rgba(16,185,129,0.45); background: rgba(16,185,129,0.14); }
 .tgl-info { display: flex; align-items: center; gap: 11px; }
 .tgl-icon {
   width: 36px; height: 36px; border-radius: 10px;
@@ -208,9 +211,11 @@ option { background: var(--bg-body); color: var(--t0); }
   display: flex; align-items: center; justify-content: center; font-size: 16px;
   flex-shrink: 0; box-shadow: var(--shadow-sm); transition: var(--trans);
 }
-.tgl-row.on .tgl-icon { background: rgba(16,185,129,0.12); border-color: rgba(16,185,129,0.25); }
+.tgl-row.on .tgl-icon,
+.tgl-row:has(input:checked) .tgl-icon { background: rgba(16,185,129,0.12); border-color: rgba(16,185,129,0.25); }
 .tgl-title { font-size: 13.5px; font-weight: 600; color: var(--t1); transition: color 0.2s; }
-.tgl-row.on .tgl-title { color: var(--emerald); font-weight: 700; }
+.tgl-row.on .tgl-title,
+.tgl-row:has(input:checked) .tgl-title { color: var(--emerald); font-weight: 700; }
 .tgl-sub { font-size: 11px; color: var(--t3); margin-top: 2px; }
 
 /* ══════════════════════════════
@@ -218,9 +223,11 @@ option { background: var(--bg-body); color: var(--t0); }
    All sizing comes from :root vars defined in queue.css.
    Do NOT redefine --toggle-* locals here.
 ══════════════════════════════ */
-.sw input { display: none; }
+.sw input,
+.toggle-switch input { display: none; }
 
-.sw-track {
+.sw-track,
+.toggle-slider {
   display: block;
   box-sizing: border-box;
   width: var(--toggle-switch-width);
@@ -245,7 +252,8 @@ option { background: var(--bg-body); color: var(--t0); }
   transition: opacity 0.35s ease;
 }
 
-.sw-track::after {
+.sw-track::after,
+.toggle-slider::after {
   content: '✕';
   position: absolute;
   top: var(--toggle-thumb-gap);
@@ -269,17 +277,20 @@ option { background: var(--bg-body); color: var(--t0); }
   pointer-events: none;
 }
 
-.sw input:checked + .sw-track {
+.sw input:checked + .sw-track,
+.toggle-switch input:checked + .toggle-slider {
   background: linear-gradient(135deg, #10b981 0%, #059669 100%);
   border-color: rgba(16, 185, 129, 0.4);
   box-shadow: inset 0 1px 2px rgba(255,255,255,0.3), 0 4px 12px rgba(16,185,129,0.28);
 }
 
-.sw input:checked + .sw-track::before {
+.sw input:checked + .sw-track::before,
+.toggle-switch input:checked + .toggle-slider::before {
   opacity: 0.2;
 }
 
-.sw input:checked + .sw-track::after {
+.sw input:checked + .sw-track::after,
+.toggle-switch input:checked + .toggle-slider::after {
   content: ' ';
   color: #10b981;
   left: calc(var(--toggle-switch-width) - var(--toggle-thumb-size) - var(--toggle-thumb-gap));
@@ -302,9 +313,6 @@ option { background: var(--bg-body); color: var(--t0); }
 .sb-grp-hd.audit-hd .sb-grp-sw input:checked + .sw-track { background: var(--violet); border-color: var(--violet); box-shadow: 0 0 12px var(--violet-glow); }
 .sb-grp-hd.inv-hd   .sb-grp-sw input:checked + .sw-track { background: var(--emerald);border-color: var(--emerald);box-shadow: 0 0 12px var(--emerald-glow); }
 
-/* ══════════════════════════════
-   CHECKBOXES
-══════════════════════════════ */
 .chk-grid { display: grid; gap: 10px; }
 .chk-card {
   display: flex; align-items: center; gap: 10px;
@@ -314,7 +322,9 @@ option { background: var(--bg-body); color: var(--t0); }
   transition: var(--trans); box-shadow: var(--shadow-sm);
 }
 .chk-card:hover { background: var(--glass-2); box-shadow: var(--shadow-md); }
-.chk-card.on { border-color: var(--chk-on-border); background: var(--chk-on-bg); }
+.chk-card.on,
+.chk-card.selected,
+.chk-card:has(input:checked) { border-color: var(--chk-on-border); background: var(--chk-on-bg); }
 .chk-card input { display: none; }
 .chk-box {
   width: 17px; height: 17px; border-radius: 5px;
@@ -322,9 +332,13 @@ option { background: var(--bg-body); color: var(--t0); }
   display: grid; place-items: center; font-size: 9px;
   color: transparent; flex-shrink: 0; transition: var(--trans);
 }
-.chk-card.on .chk-box { background: var(--accent); border-color: var(--accent); color: #fff; box-shadow: 0 2px 8px var(--accent-glow); }
+.chk-card.on .chk-box,
+.chk-card.selected .chk-box,
+.chk-card:has(input:checked) .chk-box { background: var(--accent); border-color: var(--accent); color: #fff; box-shadow: 0 2px 8px var(--accent-glow); }
 .chk-lbl { font-size: 13px; font-weight: 500; color: var(--t2); transition: color 0.2s; }
-.chk-card.on .chk-lbl { color: var(--accent); }
+.chk-card.on .chk-lbl,
+.chk-card.selected .chk-lbl,
+.chk-card:has(input:checked) .chk-lbl { color: var(--accent); }
 
 /* ══════════════════════════════
    BUTTONS
@@ -342,8 +356,27 @@ option { background: var(--bg-body); color: var(--t0); }
 .btn-ghost   { background: var(--glass-2); border-color: var(--glass-border); color: var(--t2); }
 .btn-ghost:hover { background: var(--glass-1); border-color: var(--glass-border); color: var(--t0); box-shadow: var(--shadow-md); transform: translateY(-1px); }
 
-.btn-accent  { background: var(--accent-btn); border-color: transparent; color: #fff; }
-.btn-accent:hover { box-shadow: 0 6px 22px var(--accent-glow); filter: brightness(1.08); }
+.btn-accent,
+.btn-primary {
+  background: var(--accent-btn);
+  border-color: transparent;
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  padding: 9px 20px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: var(--trans);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+.btn-accent:hover,
+.btn-primary:hover { box-shadow: 0 6px 22px var(--accent-glow); filter: brightness(1.08); }
 
 .btn-violet  { background: var(--violet-soft); border-color: rgba(139,92,246,0.28); color: var(--violet); }
 .btn-violet:hover { box-shadow: 0 3px 14px var(--violet-soft); }

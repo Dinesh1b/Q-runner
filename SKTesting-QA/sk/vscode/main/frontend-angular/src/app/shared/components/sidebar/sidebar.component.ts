@@ -1,6 +1,7 @@
 import { Component, inject, input, output } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ModuleRegistryStore } from '../../../state/module-registry.store';
+import { RunSessionStore } from '../../../state/run-session.store';
 import { MainTab } from '../nav/nav.component';
 
 @Component({
@@ -8,13 +9,19 @@ import { MainTab } from '../nav/nav.component';
   standalone: true,
   imports: [CommonModule],
   template: `
-    <aside class="sidebar" [style.display]="activeTab() === 'run' ? 'none' : ''">
-      <!-- ════════ SETUP PANEL ════════ -->
+    <aside class="sidebar">
+      <div class="sb-scroll-hint" id="sb-scroll-hint">
+        <div class="sb-scroll-fade"></div>
+        <div class="sb-scroll-pill"><span class="sb-scroll-pill-inner">↓ Scroll</span></div>
+      </div>
+
+      <!-- ── Setup Panel ── -->
       @if (activeTab() === 'setup') {
-        <div class="sb-panel visible">
+        <div class="sb-panel visible" id="sb-setup">
           <div class="sb-section-label">Configuration</div>
           <div
             class="sb-item"
+            id="ssi-0"
             [class.active]="selectedSetupStep() === 0"
             (click)="setupStepChange.emit(0)"
           >
@@ -24,126 +31,199 @@ import { MainTab } from '../nav/nav.component';
               <div class="sb-item-sub">Browser · Credentials</div>
             </div>
           </div>
-          <div
-            class="sb-item"
-            [class.active]="selectedSetupStep() === 1"
-            (click)="setupStepChange.emit(1)"
-            style="margin-top: 6px;"
-          >
-            <div class="sb-item-icon">⚡</div>
-            <div>
-              <div class="sb-item-name">Timeouts &amp; Delays</div>
-              <div class="sb-item-sub">Wait actions · Intervals</div>
+          <div style="flex:1;"></div>
+        </div>
+      }
+
+      <!-- ── Execution Panel ── -->
+      @if (activeTab() === 'execution') {
+        <div class="sb-panel visible" id="sb-execution">
+          <div id="sb-exec-scroll" style="flex:1; overflow-y:auto; overflow-x:hidden;">
+            <div style="height:6px;"></div>
+
+            <!-- Group 0: Q Audit -->
+            <div class="sb-grp">
+              <div
+                class="sb-grp-hd"
+                id="sbh-0"
+                [class.open]="registryStore.groupExpanded()[0]"
+                (click)="registryStore.toggleGroupExpand(0)"
+              >
+                <div class="sb-grp-icon">🔍</div>
+                <span class="sb-grp-name">Q Audit</span>
+                <label class="sb-grp-sw" (click)="$event.stopPropagation()">
+                  <input
+                    type="checkbox"
+                    id="grp-sw-0"
+                    [checked]="registryStore.groupEnabled()[0]"
+                    (change)="registryStore.toggleGroup(0)"
+                  />
+                  <span class="sw-track"></span>
+                </label>
+                <span
+                  class="sb-grp-chev"
+                  id="sgchev-0"
+                  [style.transform]="registryStore.groupExpanded()[0] ? 'rotate(180deg)' : ''"
+                >
+                  ▾
+                </span>
+              </div>
+
+              @if (registryStore.groupExpanded()[0]) {
+                <div class="sb-grp-body" id="sgbody-0" style="display:block;">
+                  @for (mod of getGroupModules(0); track mod.idx) {
+                    <div
+                      class="sb-sub"
+                      [id]="'emr-' + mod.idx"
+                      [class.active]="registryStore.selectedModuleIdx() === mod.idx"
+                      (click)="registryStore.selectModuleForEditing(mod.idx)"
+                    >
+                      <span class="sb-sub-icon">{{ mod.icon }}</span>
+                      <span class="sb-sub-nm">{{ mod.display }}</span>
+                    </div>
+                  }
+                </div>
+              }
             </div>
+
+            <div class="sb-grp-div"></div>
+
+            <!-- Group 1: Audit Plan -->
+            <div class="sb-grp">
+              <div
+                class="sb-grp-hd audit-hd"
+                id="sbh-1"
+                [class.open]="registryStore.groupExpanded()[1]"
+                (click)="registryStore.toggleGroupExpand(1)"
+              >
+                <div class="sb-grp-icon">📋</div>
+                <span class="sb-grp-name">Audit Plan</span>
+                <label class="sb-grp-sw" (click)="$event.stopPropagation()">
+                  <input
+                    type="checkbox"
+                    id="grp-sw-1"
+                    [checked]="registryStore.groupEnabled()[1]"
+                    (change)="registryStore.toggleGroup(1)"
+                  />
+                  <span class="sw-track"></span>
+                </label>
+                <span
+                  class="sb-grp-chev"
+                  id="sgchev-1"
+                  [style.transform]="registryStore.groupExpanded()[1] ? 'rotate(180deg)' : ''"
+                >
+                  ▾
+                </span>
+              </div>
+
+              @if (registryStore.groupExpanded()[1]) {
+                <div class="sb-grp-body" id="sgbody-1" style="display:block;">
+                  @for (mod of getGroupModules(1); track mod.idx) {
+                    <div
+                      class="sb-sub audit-sub"
+                      [id]="'emr-' + mod.idx"
+                      [class.active]="registryStore.selectedModuleIdx() === mod.idx"
+                      (click)="registryStore.selectModuleForEditing(mod.idx)"
+                    >
+                      <span class="sb-sub-icon">{{ mod.icon }}</span>
+                      <span class="sb-sub-nm">{{ mod.display }}</span>
+                    </div>
+                  }
+                </div>
+              }
+            </div>
+
+            <div class="sb-grp-div"></div>
+
+            <!-- Group 2: Inventory -->
+            <div class="sb-grp">
+              <div
+                class="sb-grp-hd inv-hd"
+                id="sbh-2"
+                [class.open]="registryStore.groupExpanded()[2]"
+                (click)="registryStore.toggleGroupExpand(2)"
+              >
+                <div class="sb-grp-icon">🗃️</div>
+                <span class="sb-grp-name">Inventory</span>
+                <label class="sb-grp-sw" (click)="$event.stopPropagation()">
+                  <input
+                    type="checkbox"
+                    id="grp-sw-2"
+                    [checked]="registryStore.groupEnabled()[2]"
+                    (change)="registryStore.toggleGroup(2)"
+                  />
+                  <span class="sw-track"></span>
+                </label>
+                <span
+                  class="sb-grp-chev"
+                  id="sgchev-2"
+                  [style.transform]="registryStore.groupExpanded()[2] ? 'rotate(180deg)' : ''"
+                >
+                  ▾
+                </span>
+              </div>
+
+              @if (registryStore.groupExpanded()[2]) {
+                <div class="sb-grp-body" id="sgbody-2" style="display:block;">
+                  @for (mod of getGroupModules(2); track mod.idx) {
+                    <div
+                      class="sb-sub inv-sub"
+                      [id]="'emr-' + mod.idx"
+                      [class.active]="registryStore.selectedModuleIdx() === mod.idx"
+                      (click)="registryStore.selectModuleForEditing(mod.idx)"
+                    >
+                      <span class="sb-sub-icon">{{ mod.icon }}</span>
+                      <span class="sb-sub-nm">{{ mod.display }}</span>
+                    </div>
+                  }
+                </div>
+              }
+            </div>
+
+            <div style="min-height:16px;"></div>
           </div>
         </div>
       }
 
-      <!-- ════════ EXECUTION PANEL ════════ -->
-      @if (activeTab() === 'execution') {
-        <div class="sb-panel visible" style="display:flex; flex-direction:column; height:100%;">
-          <!-- Quick Selection Controls -->
-          <div style="display:flex; justify-content:space-between; align-items:center; padding: 12px 14px 6px;">
-            <div class="sb-section-label" style="margin:0;">Modules</div>
-            <div style="display:flex; gap:6px;">
-              <button
-                type="button"
-                class="btn-link"
-                style="font-size:9.5px; text-transform:uppercase;"
-                (click)="registryStore.selectAll()"
-              >
-                All
-              </button>
-              <span style="color:var(--t4);">·</span>
-              <button
-                type="button"
-                class="btn-link"
-                style="font-size:9.5px; text-transform:uppercase; color:var(--t3);"
-                (click)="registryStore.deselectAll()"
-              >
-                None
-              </button>
-            </div>
-          </div>
-
-          <!-- Module Groups Accordion -->
-          <div style="flex:1; overflow-y:auto; overflow-x:hidden; padding: 0 10px;">
-            @for (grp of registryStore.groups(); track grp.idx) {
-              <div class="sb-grp" style="margin-bottom:8px;">
-                <!-- Group Header -->
-                <div
-                  class="sb-grp-hd"
-                  [class.open]="registryStore.groupExpanded()[grp.idx]"
-                  (click)="registryStore.toggleGroupExpand(grp.idx)"
-                >
-                  <div class="sb-grp-icon">
-                    {{ grp.idx === 0 ? '🔍' : grp.idx === 1 ? '📅' : '📦' }}
-                  </div>
-                  <span class="sb-grp-name">{{ grp.name }}</span>
-
-                  <!-- Group Toggle Switch -->
-                  <label class="sb-grp-sw" (click)="$event.stopPropagation()">
-                    <input
-                      type="checkbox"
-                      [checked]="registryStore.groupEnabled()[grp.idx]"
-                      (change)="registryStore.toggleGroup(grp.idx)"
-                    />
-                    <span class="sw-track"></span>
-                  </label>
-
-                  <span
-                    class="sb-grp-chev"
-                    [style.transform]="registryStore.groupExpanded()[grp.idx] ? 'rotate(180deg)' : ''"
-                  >
-                    ▾
-                  </span>
-                </div>
-
-                <!-- Group Sub-items -->
-                <div
-                  class="sb-grp-body"
-                  [class.open]="registryStore.groupExpanded()[grp.idx]"
-                >
-                  @for (mod of getModulesForGroup(grp.idx); track mod.idx) {
-                    <div
-                      class="sb-sub"
-                      [class.active]="registryStore.selectedModuleIdx() === mod.idx"
-                      (click)="registryStore.selectModuleForEditing(mod.idx)"
-                    >
-                      <span class="sb-sub-icon">{{ mod.icon || '⚙️' }}</span>
-                      <span class="sb-sub-nm">{{ mod.display }}</span>
-
-                      <!-- Module checkbox toggle -->
-                      <label
-                        class="toggle-switch small"
-                        style="margin-left:auto; cursor:pointer;"
-                        (click)="$event.stopPropagation()"
-                      >
-                        <input
-                          type="checkbox"
-                          [checked]="registryStore.moduleEnabled()[mod.idx]"
-                          (change)="registryStore.toggleModule(mod.idx)"
-                        />
-                        <span class="toggle-slider"></span>
-                      </label>
-                    </div>
-                  }
-                </div>
+      <!-- ── Run Panel ── -->
+      @if (activeTab() === 'run') {
+        <div class="sb-panel visible" id="sb-run">
+          @if (sessionStore.isRunning() || sessionStore.runId()) {
+            <div class="sb-run-state" id="sb-run-state" style="display:block;">
+              <div style="display:flex; align-items:center; gap:7px;">
+                <div class="sb-run-state-dot" id="srs-dot" [class.running]="sessionStore.isRunning()"></div>
+                <span class="sb-run-state-lbl" id="srs-label">{{ sessionStore.status().toUpperCase() }}</span>
+                <span class="sb-run-state-id" id="srs-id">#{{ sessionStore.runId() || '—' }}</span>
               </div>
-            }
-          </div>
-
-          <!-- Footer Count -->
-          <div style="padding:14px; border-top:1px solid var(--glass-border-dim); background:var(--glass-4);">
-            <div style="display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:10px; color:var(--t3); margin-bottom:6px;">
-              <span>Active Modules</span>
-              <span>{{ registryStore.activeCount() }} / {{ registryStore.totalCount() }}</span>
+              <div style="display:flex; justify-content:space-between; align-items:center; gap:6px; margin-top:6px;">
+                <span class="sb-run-state-mod" id="srs-mod">{{ sessionStore.currentStepText() }}</span>
+                <span class="sb-run-state-pct" id="srs-pct">{{ sessionStore.progress() }}%</span>
+              </div>
+              <div class="sb-run-state-track" style="margin-top:6px;">
+                <div class="sb-run-state-fill" id="srs-fill" [style.width.%]="sessionStore.progress()"></div>
+              </div>
             </div>
-            <div style="height:4px; width:100%; background:var(--glass-border-dim); border-radius:2px; overflow:hidden;">
-              <div
-                style="height:100%; background:var(--accent-btn); border-radius:2px; transition:width 0.3s;"
-                [style.width.%]="(registryStore.activeCount() / registryStore.totalCount()) * 100"
-              ></div>
+          } @else {
+            <div class="sb-run-empty" id="sb-run-empty">
+              <div class="sb-run-empty-icon">
+                <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="color:var(--t4)">
+                  <polygon points="5 3 19 12 5 21" />
+                </svg>
+              </div>
+              <div class="sb-run-empty-title">Ready to Run</div>
+              <div class="sb-run-empty-body">Configure modules in <strong>Execution</strong>, then launch here.</div>
+            </div>
+          }
+
+          <div style="flex:1;"></div>
+
+          <div class="sb-foot">
+            <div class="sb-foot-row">
+              <span class="sb-foot-lbl">Status</span>
+              <span class="sb-foot-val" id="run-sb-status">{{ sessionStore.status().toUpperCase() }}</span>
+            </div>
+            <div class="sb-foot-bar">
+              <div class="sb-foot-fill" id="run-sb-fill" [style.width.%]="sessionStore.progress()"></div>
             </div>
           </div>
         </div>
@@ -153,12 +233,13 @@ import { MainTab } from '../nav/nav.component';
 })
 export class SidebarComponent {
   readonly registryStore = inject(ModuleRegistryStore);
+  readonly sessionStore = inject(RunSessionStore);
 
   readonly activeTab = input<MainTab>('setup');
   readonly selectedSetupStep = input<number>(0);
   readonly setupStepChange = output<number>();
 
-  getModulesForGroup(groupIdx: number) {
+  getGroupModules(groupIdx: number) {
     return this.registryStore.modules().filter(m => m.group === groupIdx);
   }
 }
