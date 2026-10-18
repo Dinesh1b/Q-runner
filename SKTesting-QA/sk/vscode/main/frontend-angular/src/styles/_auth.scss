@@ -1,0 +1,446 @@
+/* ═══════════════════════════════════════════════════════════════
+   Q-ARunner — _auth.scss
+   Styles for Authentication cards, step indicator, OTP rows,
+   password strength meter, alerts, and dev toast.
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── PAGE WRAPPER ── */
+.auth-wrap {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 80px 20px 40px;
+}
+
+/* ── AUTH CARD ── */
+.auth-card {
+  width: 100%;
+  max-width: 440px;
+  background: var(--glass-1);
+  backdrop-filter: blur(28px);
+  -webkit-backdrop-filter: blur(28px);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  animation: slideUp 0.32s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+.auth-card.wide {
+  max-width: 480px;
+}
+
+.auth-head {
+  padding: 28px 28px 20px;
+  border-bottom: 1px solid var(--glass-border-dim);
+  background: var(--glass-3);
+}
+
+.auth-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: .22em;
+  text-transform: uppercase;
+  color: var(--accent);
+  padding: 5px 13px;
+  border-radius: 20px;
+  background: var(--accent-soft);
+  border: 1px solid rgba(99, 102, 241, 0.22);
+  margin-bottom: 14px;
+}
+
+.auth-badge-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+
+.auth-title {
+  font-weight: 800;
+  font-size: 22px;
+  color: var(--t0);
+  letter-spacing: -.03em;
+  line-height: 1.2;
+  margin-bottom: 5px;
+}
+
+.auth-title em {
+  color: var(--accent);
+  font-style: normal;
+}
+
+.auth-sub {
+  font-size: 13px;
+  color: var(--t3);
+  line-height: 1.5;
+}
+
+.auth-sub strong {
+  color: var(--t2);
+  font-weight: 600;
+}
+
+.auth-body {
+  padding: 24px 28px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ── PASSWORD STRENGTH ── */
+.pw-strength {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.pw-bar {
+  flex: 1;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--glass-3);
+  transition: background 0.3s;
+}
+
+.pw-bar.s1 { background: var(--rose); }
+.pw-bar.s2 { background: var(--amber); }
+.pw-bar.s3 { background: var(--sky); }
+.pw-bar.s4 { background: var(--emerald); }
+
+.pw-label {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: .1em;
+  color: var(--t4);
+  margin-top: 4px;
+  text-align: right;
+  transition: color 0.3s;
+}
+
+/* ── OTP INPUTS ── */
+.otp-row {
+  display: flex;
+  gap: 9px;
+  justify-content: center;
+  margin: 4px 0;
+}
+
+.otp-input {
+  width: 50px;
+  height: 58px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 22px;
+  font-weight: 500;
+  background: var(--input-bg);
+  border: 1.5px solid var(--input-border);
+  border-radius: 12px;
+  color: var(--t0);
+  outline: none;
+  transition: var(--trans);
+  box-shadow: var(--shadow-sm);
+  caret-color: var(--accent);
+}
+
+.otp-input:focus {
+  border-color: var(--input-focus-border);
+  box-shadow: var(--input-focus-shadow);
+  background: var(--glass-2);
+}
+
+.otp-input.filled {
+  border-color: rgba(99, 102, 241, 0.35);
+  background: var(--accent-soft);
+}
+
+.otp-sep {
+  display: flex;
+  align-items: center;
+  color: var(--t4);
+  font-family: var(--font-mono);
+  font-size: 16px;
+}
+
+/* ── FOOTER LINKS ── */
+.auth-foot {
+  padding: 14px 28px 20px;
+  border-top: 1px solid var(--glass-border-dim);
+  background: var(--glass-4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--t3);
+}
+
+.auth-foot a {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  transition: var(--trans);
+}
+
+.auth-foot a:hover {
+  color: var(--violet);
+}
+
+/* ── CHECKLIST ── */
+.pw-rules {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 4px;
+}
+
+.pw-rule {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--t3);
+  transition: color 0.2s;
+}
+
+.pw-rule.ok {
+  color: var(--emerald);
+}
+
+.pw-rule-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1.5px solid var(--t4);
+  display: grid;
+  place-items: center;
+  font-size: 8px;
+  flex-shrink: 0;
+  transition: var(--trans);
+}
+
+.pw-rule.ok .pw-rule-dot {
+  background: var(--emerald);
+  border-color: var(--emerald);
+  color: #fff;
+}
+
+/* ── PROGRESS STEPS ── */
+.step-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  margin-bottom: 6px;
+}
+
+.step-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  position: relative;
+}
+
+.step-circle {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 500;
+  border: 1.5px solid var(--glass-border-dim);
+  background: var(--glass-3);
+  color: var(--t3);
+  transition: var(--trans);
+  flex-shrink: 0;
+}
+
+.step-circle.done {
+  background: var(--emerald-soft);
+  border-color: rgba(16, 185, 129, 0.3);
+  color: var(--emerald);
+}
+
+.step-circle.active {
+  background: var(--accent-btn);
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 2px 10px var(--accent-glow);
+}
+
+.step-label {
+  font-family: var(--font-mono);
+  font-size: 7.5px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--t4);
+  white-space: nowrap;
+  transition: color 0.2s;
+}
+
+.step-label.active {
+  color: var(--accent);
+}
+
+.step-line {
+  flex: 1;
+  height: 1.5px;
+  background: var(--glass-border-dim);
+  margin: 0 4px;
+  margin-bottom: 20px;
+  min-width: 28px;
+}
+
+.step-line.done {
+  background: linear-gradient(90deg, var(--emerald), var(--accent));
+}
+
+/* ── SUCCESS RING ── */
+.success-ring {
+  width: 72px;
+  height: 72px;
+  border-radius: 20px;
+  margin: 0 auto 18px;
+  background: var(--emerald-soft);
+  border: 1px solid rgba(16, 185, 129, 0.28);
+  display: grid;
+  place-items: center;
+  font-size: 34px;
+  animation: bounceIn 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+/* ── BACK LINK ── */
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: .1em;
+  color: var(--t3);
+  cursor: pointer;
+  transition: var(--trans);
+  text-decoration: none;
+  margin-bottom: 2px;
+}
+
+.back-link:hover {
+  color: var(--accent);
+}
+
+.back-link svg {
+  transition: transform 0.2s;
+}
+
+.back-link:hover svg {
+  transform: translateX(-3px);
+}
+
+/* ── RESEND TIMER ── */
+.resend-row {
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--t3);
+}
+
+.resend-count {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  color: var(--t2);
+}
+
+/* ── DEV OTP TOAST ── */
+.dev-toast {
+  position: fixed;
+  bottom: 28px;
+  right: 28px;
+  z-index: 9999;
+  background: #0d1117;
+  border: 1px solid rgba(99, 102, 241, 0.5);
+  border-radius: 16px;
+  padding: 16px 20px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(99, 102, 241, 0.15);
+  font-family: var(--font-mono);
+  min-width: 270px;
+  animation: toastIn 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.dev-toast-tag {
+  font-size: 8px;
+  letter-spacing: .22em;
+  text-transform: uppercase;
+  color: rgba(99, 102, 241, 0.8);
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dev-toast-tag::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #6366f1;
+  flex-shrink: 0;
+  animation: devPulse 1.5s ease-in-out infinite;
+}
+
+.dev-toast-email {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.35);
+  margin-bottom: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dev-toast-code {
+  font-size: 34px;
+  font-weight: 600;
+  letter-spacing: 10px;
+  color: #fff;
+  text-align: center;
+  padding: 10px 0;
+  background: rgba(99, 102, 241, 0.1);
+  border-radius: 10px;
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  margin-bottom: 8px;
+  cursor: pointer;
+}
+
+.dev-toast-hint {
+  font-size: 9px;
+  color: rgba(255, 255, 255, 0.2);
+  text-align: center;
+  line-height: 1.5;
+}
+
+.dev-toast-close {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.25);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  transition: color 0.2s;
+  padding: 0;
+}
+
+.dev-toast-close:hover {
+  color: rgba(255, 255, 255, 0.6);
+}
