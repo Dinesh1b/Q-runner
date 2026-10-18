@@ -2,6 +2,7 @@
 app.py — Q-Audit Runner Flask Application Factory.
 
 Creates and configures the Flask app with all blueprints registered.
+Serves the Angular production SPA from frontend-angular/dist/frontend-angular/browser/.
 """
 
 import os
@@ -11,20 +12,40 @@ from flask import Flask
 from flask_cors import CORS
 
 
-
 def create_app():
     """Create and configure the Flask application."""
     _HERE = os.path.dirname(os.path.abspath(__file__))
     _PROJECT_ROOT = os.path.abspath(os.path.join(_HERE, ".."))
 
+    # Angular production build output (browser bundle)
+    _ANGULAR_DIST = os.path.join(
+        _PROJECT_ROOT,
+        "frontend-angular", "dist", "frontend-angular", "browser"
+    )
+
+    # Determine template folder (index.html lives in the Angular dist/browser dir).
+    # We do NOT set static_folder on the Flask app itself; instead the pages blueprint
+    # uses send_from_directory() for all asset serving.  This prevents Flask's built-in
+    # /<path:filename> static endpoint from conflicting with our SPA fallback logic.
+    if os.path.isdir(_ANGULAR_DIST):
+        _template_folder = _ANGULAR_DIST
+    else:
+        # Angular build not present – fall back so server can still start.
+        _template_folder = os.path.join(_PROJECT_ROOT, "frontend", "templates")
+
     app = Flask(
         __name__,
-        template_folder=os.path.join(_PROJECT_ROOT, "frontend", "templates"),
-        static_folder=os.path.join(_PROJECT_ROOT, "frontend", "static"),
+        template_folder=_template_folder,
+        static_folder=None,   # asset serving handled by pages blueprint
     )
     CORS(app)
     app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
-    app.config["SKIP_AUTH"] = True
+    # SKIP_AUTH=True is a development convenience only.
+    # Set SKIP_AUTH=False (or remove this line) in production environments.
+    app.config["SKIP_AUTH"] = os.environ.get("SKIP_AUTH", "true").lower() in ("1", "true", "yes")
+
+    # Store Angular dist path so blueprints can reference it
+    app.config["ANGULAR_DIST"] = _ANGULAR_DIST
 
     # Initialize databases
     from backend.services.db import init_db, init_auth_db
@@ -56,7 +77,7 @@ if __name__ == "__main__":
         sys.path.insert(0, _root)
 
     app = create_app()
-    print("\n  Q-Audit Runner  (v10 - Pro Scalable)")
+    print("\n  Q-Audit Runner  (v10 - Pro Scalable + Angular)")
     print("  " + "-" * 57)
     print("  Open in browser ->  http://localhost:5000")
     print("  Press Ctrl+C to stop\n")

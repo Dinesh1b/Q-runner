@@ -11,7 +11,7 @@ export const authGuard: CanActivateFn = () => {
     if (authService.skipAuth() || authService.isAuthenticated()) {
       return true;
     }
-    return router.createUrlTree(['/auth/login']);
+    return router.createUrlTree(['/login']);
   }
 
   return authService.checkAuthStatus().pipe(
@@ -19,7 +19,7 @@ export const authGuard: CanActivateFn = () => {
       if (res.skip_auth || res.authenticated) {
         return true;
       }
-      return router.createUrlTree(['/auth/login']);
+      return router.createUrlTree(['/login']);
     })
   );
 };

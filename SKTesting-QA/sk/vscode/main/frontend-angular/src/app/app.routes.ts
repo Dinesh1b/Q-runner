@@ -16,34 +16,46 @@ export const routes: Routes = [
       import('./features/auth/auth.component').then(m => m.AuthComponent)
   },
   {
+    path: 'auth/:view',
+    canActivate: [guestGuard],
+    loadComponent: () =>
+      import('./features/auth/auth.component').then(m => m.AuthComponent)
+  },
+  {
     path: 'login',
-    redirectTo: 'auth',
-    pathMatch: 'full'
+    canActivate: [guestGuard],
+    loadComponent: () =>
+      import('./features/auth/auth.component').then(m => m.AuthComponent)
   },
   {
     path: 'signup',
-    redirectTo: 'auth',
-    pathMatch: 'full'
+    canActivate: [guestGuard],
+    loadComponent: () =>
+      import('./features/auth/auth.component').then(m => m.AuthComponent)
   },
   {
     path: 'verify',
-    redirectTo: 'auth',
-    pathMatch: 'full'
+    canActivate: [guestGuard],
+    loadComponent: () =>
+      import('./features/auth/auth.component').then(m => m.AuthComponent)
   },
   {
     path: 'set-password',
-    redirectTo: 'auth',
-    pathMatch: 'full'
+    canActivate: [guestGuard],
+    loadComponent: () =>
+      import('./features/auth/auth.component').then(m => m.AuthComponent)
   },
   {
     path: 'forgot-password',
-    redirectTo: 'auth',
-    pathMatch: 'full'
+    canActivate: [guestGuard],
+    loadComponent: () =>
+      import('./features/auth/auth.component').then(m => m.AuthComponent)
   },
   {
     path: 'reset-password',
-    redirectTo: 'auth',
-    pathMatch: 'full'
+    canActivate: [guestGuard],
+    loadComponent: () =>
+      import('./features/auth/auth.component').then(m => m.AuthComponent)
   },
   {
     path: '**',

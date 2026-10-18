@@ -95,7 +95,7 @@ export class AuthService {
       tap(() => {
         this.user.set(null);
         this.isAuthenticated.set(false);
-        this.router.navigate(['/auth/login']);
+        this.router.navigate(['/login']);
       })
     );
   }
