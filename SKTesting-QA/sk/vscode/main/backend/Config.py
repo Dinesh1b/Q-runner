@@ -33,12 +33,12 @@ class Config:
     mapping = {}
 
     # --- Group flags (derived from sub-module flags) ---
-    run_Q_audit    = True
+    run_Q_audit    = False
     run_Audit_plan = False
     run_inventory  = False
 
     # Module run flags — Q Audit
-    run_q_setting        = True
+    run_q_setting        = False
     run_Q_SA             = False
     run_Q_SA1            = False
     run_Q_as_table       = False
@@ -55,17 +55,17 @@ class Config:
 
     # Module run flags — Auditor 2
     run_new_add_item2    = False
-    run_stock_audit      = False
+    run_stock_audit2     = False
     run_A_SA_table       = False
     run_A_as_table       = False  # legacy key for app.py
     run_A_audit_Summary  = False
     run_A_Recently_Audit = False
 
-    MODULE_RUN_ORDER = ['run_q_setting']
+    MODULE_RUN_ORDER = []
 
     # Inventory
     run_create_group  = False
-    run_locatio_setup = False
+    run_location_setup = False
     run_import_app    = False
 
     EXCEL_PATH = "C:/Users/HP/Documents/input/main_qexcel.xlsx"

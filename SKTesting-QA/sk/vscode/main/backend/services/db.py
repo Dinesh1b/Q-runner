@@ -38,21 +38,41 @@ def init_db():
         con.commit()
 
 
-def db_insert_step(run_id, step, status, progress):
+RUN_STEP = "Run"
+
+
+def db_start_run(run_id):
+    """Record the run itself so failed or stopped runs still appear in history."""
     with sqlite3.connect(DB_PATH) as con:
         con.execute(
             "INSERT INTO runs(run_id,step,status,progress,started_at) VALUES(?,?,?,?,?)",
-            (run_id, step, status, progress, time.time()),
+            (run_id, RUN_STEP, "running", 0, time.time()),
+        )
+        con.commit()
+
+
+def db_insert_step(run_id, step, status, progress):
+    now = time.time()
+    with sqlite3.connect(DB_PATH) as con:
+        con.execute(
+            "INSERT INTO runs(run_id,step,status,progress,started_at,ended_at) VALUES(?,?,?,?,?,?)",
+            (run_id, step, status, progress, now, now),
         )
         con.commit()
 
 
 def db_finish_run(run_id, status):
+    now = time.time()
     with sqlite3.connect(DB_PATH) as con:
-        con.execute(
-            "UPDATE runs SET ended_at=?, status=? WHERE run_id=? AND ended_at IS NULL",
-            (time.time(), status, run_id),
+        cur = con.execute(
+            "UPDATE runs SET ended_at=?, status=? WHERE run_id=? AND step=? AND ended_at IS NULL",
+            (now, status, run_id, RUN_STEP),
         )
+        if cur.rowcount == 0:
+            con.execute(
+                "INSERT INTO runs(run_id,step,status,progress,started_at,ended_at) VALUES(?,?,?,?,?,?)",
+                (run_id, RUN_STEP, status, 0, now, now),
+            )
         con.commit()
 
 

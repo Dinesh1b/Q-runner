@@ -284,7 +284,7 @@ import { ModuleRegistryStore } from '../../../state/module-registry.store';
           style="background: linear-gradient(135deg, #f59e0b, #d97706);"
           (click)="registryStore.selectModuleForEditing(10)"
         >
-          A_as_table →
+          Table · Summary · Recent →
         </button>
       </div>
     </div>

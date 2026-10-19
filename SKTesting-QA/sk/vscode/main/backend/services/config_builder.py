@@ -13,16 +13,29 @@ def build_config_py(cfg: dict) -> str:
         return "True" if val else "False"
 
     def s(val):
+        # repr() escapes quotes/backslashes so UI input can never break or inject code.
         if val is None or val == "":
             return "None"
-        return '"{}"'.format(val)
+        return repr(str(val))
 
     def p(val):
         """Path helper — converts backslashes to forward slashes (safe on Windows)."""
         if val is None or val == "":
             val = "C:/Users/HP/Documents/input/main_qexcel.xlsx"
-        val = val.replace("\\", "/")
-        return '"{}"'.format(val)
+        val = str(val).replace("\\", "/")
+        return repr(val)
+
+    def n(val, default):
+        """Numeric helper — emits an int/float literal, falling back to default for blank/invalid input."""
+        if isinstance(val, bool):
+            return repr(int(val))
+        if isinstance(val, (int, float)):
+            return repr(val)
+        try:
+            text = str(val).strip()
+            return repr(int(text)) if text.lstrip("-").isdigit() else repr(float(text))
+        except (TypeError, ValueError):
+            return repr(default)
 
     def g(key, default=None):
         return cfg.get(key, default)
@@ -154,6 +167,7 @@ class Config:
     run_new_add_item2    = {run_new_add_item2}
     run_stock_audit2     = {run_stock_audit2}
     run_A_SA_table       = {run_A_SA_table}
+    run_A_as_table       = {run_A_SA_table}
     run_A_audit_Summary  = {run_A_audit_Summary}
     run_A_Recently_Audit = {run_A_Recently_Audit}
     
@@ -334,9 +348,9 @@ class Config:
     Item_Tax            = {Item_Tax}
     Item_ReorderLimit   = {Item_ReorderLimit}
 '''.format(
-        DEFAULT_TIMEOUT   = g("DEFAULT_TIMEOUT",   10000),
-        SHORT_TIMEOUT     = g("SHORT_TIMEOUT",     5000),
-        WAIT_AFTER_ACTION = g("WAIT_AFTER_ACTION", 300),
+        DEFAULT_TIMEOUT   = n(g("DEFAULT_TIMEOUT"),   10000),
+        SHORT_TIMEOUT     = n(g("SHORT_TIMEOUT"),     5000),
+        WAIT_AFTER_ACTION = n(g("WAIT_AFTER_ACTION"), 300),
         USE_CUSTOM_LOGIN  = b(g("USE_CUSTOM_LOGIN", False)),
         email             = email_val,
         password          = password_val,
@@ -390,12 +404,12 @@ class Config:
         EXCEL_storage_col            = s(g("EXCEL_storage_col",           "Storage")),
         location1    = s(g("location1", "SA-A1")),
         code1        = s(g("code1",     "ABC1123")),
-        aud_qty1     = g("aud_qty1", 0),
-        dam_qty1     = g("dam_qty1", 0),
+        aud_qty1     = n(g("aud_qty1"), 0),
+        dam_qty1     = n(g("dam_qty1"), 0),
         location2    = s(g("location2", "SA-A1")),
         code2        = s(g("code2",     "ABC1123")),
-        aud_qty2     = g("aud_qty2", 0),
-        dam_qty2     = g("dam_qty2", 0),
+        aud_qty2     = n(g("aud_qty2"), 0),
+        dam_qty2     = n(g("dam_qty2"), 0),
         EXCEL_SHEET_audit_Summary    = s(g("EXCEL_SHEET_audit_Summary", "auditSummary")),
         FILTER_COLUMN                = s(g("FILTER_COLUMN", "filter")),
         ITEM_CODE1    = s(g("ITEM_CODE1", "ABC1123")),
@@ -406,8 +420,8 @@ class Config:
         LOCATION1     = s(g("LOCATION1", "SA-A1")),
         BARCODE1      = s(g("BARCODE1", "123456789")),
         UOM1          = s(g("UOM1", "PCS")),
-        audited_qty1  = g("audited_qty1", 10),
-        damaged_qty1  = g("damaged_qty1", 0),
+        audited_qty1  = n(g("audited_qty1"), 10),
+        damaged_qty1  = n(g("damaged_qty1"), 0),
         run_new_add_item      = b(g("run_new_add_item", False)),
         EXCEL_SHEET_auditor_1 = s(g("EXCEL_SHEET_auditor_1", "auditor_1")),
         EXCEL_LOCATION_COL1   = s(g("EXCEL_LOCATION_COL1",   "locations")),
@@ -422,8 +436,8 @@ class Config:
         LOCATION2     = s(g("LOCATION2", "SA-A1")),
         BARCODE2      = s(g("BARCODE2", "123456789")),
         UOM2          = s(g("UOM2", "PCS")),
-        audited_qty2  = g("audited_qty2", 10),
-        damaged_qty2  = g("damaged_qty2", 0),
+        audited_qty2  = n(g("audited_qty2"), 10),
+        damaged_qty2  = n(g("damaged_qty2"), 0),
         EXCEL_SHEET_auditor_2 = s(g("EXCEL_SHEET_auditor_2", "auditor_2")),
         EXCEL_LOCATION_COL2   = s(g("EXCEL_LOCATION_COL2",   "locations")),
         EXCEL_CODE_COL2       = s(g("EXCEL_CODE_COL2",       "code")),
@@ -440,7 +454,7 @@ class Config:
         ap_audit_name = s(g("ap_audit_name", "")),
         Audit_Type    = s(g("Audit_Type",   "Complete Count")),
         frequency     = s(g("frequency",    "one-time")),
-        Day_s         = g("Day_s", 30),
+        Day_s         = n(g("Day_s"), 30),
         Target__Day   = s(g("Target__Day",  "Thursday")),
         Target_Date   = s(g("Target_Date",  "05/03/2026")),
         A_Checkboxes_Audit_Damaged = b(g("A_Checkboxes_Audit_Damaged", False)),
@@ -448,7 +462,7 @@ class Config:
         A_Checkboxes_geo           = b(g("A_Checkboxes_geo",           False)),
         A_Checkboxes_photo         = b(g("A_Checkboxes_photo",         False)),
         photo_type    = s(g("photo_type", "None")),
-        sample_size   = g("sample_size", 0),
+        sample_size   = n(g("sample_size"), 0),
         CROSS_AUDIT_TYPE   = s(g("CROSS_AUDIT_TYPE",   "Random Recheck")),
         CROSS_Auditor_name = s(g("CROSS_Auditor_name", "Dinesh")),
         AUDIT_MAPPING_TYPE = s(normalize_audit_mapping_type(
@@ -470,8 +484,8 @@ class Config:
         Item_UOM              = s(g("Item_UOM", "km")),
         Item_Category         = s(g("Item_Category", "Category132!")),
         Item_Tag              = s(g("Item_Tag", "test tag1")),
-        Item_CP               = g("Item_CP", 100),
-        Item_SP               = g("Item_SP", 150),
+        Item_CP               = n(g("Item_CP"), 100),
+        Item_SP               = n(g("Item_SP"), 150),
         Item_Barcode          = s(g("Item_Barcode", "1234u56789")),
         Item_Description      = s(g("Item_Description", "")),
         Item_TaxHsn           = s(g("Item_TaxHsn", "")),
@@ -490,7 +504,7 @@ class Config:
         oa_A_Checkboxes_geo           = b(g("oa_A_Checkboxes_geo",           False)),
         oa_A_Checkboxes_photo         = b(g("oa_A_Checkboxes_photo",         False)),
         oa_photo_type   = s(g("oa_photo_type", "None")),
-        oa_sample_size  = g("oa_sample_size", 0),
+        oa_sample_size  = n(g("oa_sample_size"), 0),
         oa_mapping                    = repr(g("oa_mapping", {})),
     )
     return content

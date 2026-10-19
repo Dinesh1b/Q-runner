@@ -11,6 +11,12 @@
 Utility to detect and log feedback messages (SweetAlert2 / PrimeNG) after form submission.
 """
 
+import sys
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 from playwright.sync_api import Page
 import time
 from datetime import datetime

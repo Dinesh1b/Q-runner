@@ -35,11 +35,13 @@ export class RunSessionStore implements OnDestroy {
   });
 
   readonly isRunning = computed(() => this.status() === 'running');
+  /** Running or still stopping — a run is in flight and a new one must not start. */
+  readonly isActive = computed(() => this.status() === 'running' || this.status() === 'stopping');
 
   startRun(): void {
-    if (this.isRunning()) return;
+    if (this.isActive()) return;
 
-    this.clearSession();
+    this.resetSession();
     this.status.set('running');
     this.currentStepText.set('Initializing...');
     this.startTimer();
@@ -68,14 +70,8 @@ export class RunSessionStore implements OnDestroy {
     this.appendLog('[WARN] Stop requested by user...', 'warn');
 
     this.runnerService.stopRun().subscribe({
-      next: () => {
-        this.status.set('stopped');
-        this.finishRun('stopped');
-      },
-      error: () => {
-        this.status.set('stopped');
-        this.finishRun('stopped');
-      }
+      next: () => this.finishRun('stopped'),
+      error: () => this.finishRun('stopped')
     });
   }
 
@@ -86,17 +82,20 @@ export class RunSessionStore implements OnDestroy {
       next: (line) => {
         this.handleStreamLine(line);
       },
-      error: (err) => {
-        if (this.isRunning()) {
-          this.appendLog('[WARN] Stream connection disconnected. Attempting to recover...', 'warn');
-        }
-      },
-      complete: () => {
-        if (this.isRunning()) {
-          this.finishRun('completed');
-        }
-      }
+      error: () => this.handleStreamLost(),
+      // The stream ends normally only after __DONE__/__ERROR__, which finish the run first.
+      complete: () => this.handleStreamLost()
     });
+  }
+
+  private handleStreamLost(): void {
+    if (this.status() === 'stopping') {
+      this.finishRun('stopped');
+    } else if (this.isRunning()) {
+      this.errorMessage.set('Lost connection to the run log stream');
+      this.appendLog('[ERROR] Lost connection to the run log stream — check that the backend is still running', 'error');
+      this.finishRun('failed');
+    }
   }
 
   private handleStreamLine(line: string): void {
@@ -107,7 +106,7 @@ export class RunSessionStore implements OnDestroy {
       return;
     }
     if (line === '__ERROR__') {
-      this.finishRun('failed');
+      this.finishRun(this.status() === 'stopping' ? 'stopped' : 'failed');
       return;
     }
 
@@ -120,6 +119,11 @@ export class RunSessionStore implements OnDestroy {
           if (obj.step) this.currentStepText.set(obj.step);
           return;
         }
+        if (obj.type === 'init') {
+          const names: string[] = Array.isArray(obj.modules) ? obj.modules : [];
+          this.appendLog(`[INFO] Modules to run (${names.length}): ${names.join(', ')}`, 'info');
+          return;
+        }
       } catch {
         // Not a JSON progress packet, proceed to plain log
       }
@@ -128,6 +132,12 @@ export class RunSessionStore implements OnDestroy {
     // Classify log line
     const level = this.classifyLogLevel(line);
     this.appendLog(line, level);
+
+    // Single-process runs report the current module as "Running module index: N (Name)"
+    const moduleMatch = line.match(/^Running module index: \d+ \((.*)\)/);
+    if (moduleMatch) {
+      this.currentStepText.set(moduleMatch[1]);
+    }
 
     // If step is indicated in text, e.g. [STEP] Running Module 2...
     if (line.includes('[STEP]')) {
@@ -172,6 +182,8 @@ export class RunSessionStore implements OnDestroy {
   }
 
   private finishRun(finalStatus: RunStatus): void {
+    // A run finishes exactly once (stream marker, stream loss and /stop response can all race).
+    if (!this.isActive()) return;
     this.stopTimer();
     this.streamSub?.unsubscribe();
     this.streamSub = null;
@@ -205,10 +217,29 @@ export class RunSessionStore implements OnDestroy {
     }
   }
 
+  /**
+   * "Clear" button: always clears the terminal. While a run is in flight the stream,
+   * timer and status are kept so the run can still finish and be stopped.
+   */
   clearSession(): void {
+    if (this.isActive()) {
+      this.clearLogs();
+      return;
+    }
+    this.resetSession();
+  }
+
+  private resetSession(): void {
     this.stopTimer();
     this.streamSub?.unsubscribe();
     this.streamSub = null;
+    this.clearLogs();
+    this.progress.set(0);
+    this.elapsedSeconds.set(0);
+    this.errorMessage.set(null);
+  }
+
+  private clearLogs(): void {
     this.logs.set([]);
     this.logOkCount.set(0);
     this.logErrCount.set(0);

@@ -1,0 +1,19 @@
+# Q-Audit Runner backend + automation dependencies.
+# Versions are the ones verified working on the development machine (Python 3.13).
+# Install:  python -m pip install -r backend/requirements.txt
+#           python -m playwright install chrome firefox webkit
+
+# Web backend
+flask==3.1.3
+flask-cors==6.0.2
+argon2-cffi==25.1.0      # password hashing (stored hashes are $argon2)
+
+# Excel handling (uploads, workflows)
+openpyxl==3.1.5
+pandas==2.3.3
+
+# Automation
+playwright==1.59.0
+pytz==2025.2             # backend/shared/timezone_helper.py
+pyautogui==0.9.54        # audit/Ongo_Audit.py
+pytest==9.0.2            # imported by *_Recently_audit.py workflows; also runs backend/tests

@@ -1,6 +1,6 @@
-import { Component, inject } from '@angular/core';
+import { Component, inject, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { ModuleRegistryStore } from '../../state/module-registry.store';
+import { ModuleRegistryStore, A2_REPORT_MODULES } from '../../state/module-registry.store';
 import { M0QSettingComponent } from './modules/m0-q-setting.component';
 import { M1StockAuditA1Component } from './modules/m1-stock-audit-a1.component';
 import { M2StockAuditA2Component } from './modules/m2-stock-audit-a2.component';
@@ -12,8 +12,6 @@ import { M7OngoingAuditComponent } from './modules/m7-ongoing-audit.component';
 import { M8Auditor1SaComponent } from './modules/m8-auditor1-sa.component';
 import { M9Auditor2SaComponent } from './modules/m9-auditor2-sa.component';
 import { M10AAsTableComponent } from './modules/m10-a-as-table.component';
-import { M11AAuditSummaryComponent } from './modules/m11-a-audit-summary.component';
-import { M12ARecentlyAuditComponent } from './modules/m12-a-recently-audit.component';
 import { M13CreateGroupComponent } from './modules/m13-create-group.component';
 import { M14LocationSetupComponent } from './modules/m14-location-setup.component';
 import { M15ImportItemsComponent } from './modules/m15-import-items.component';
@@ -34,8 +32,6 @@ import { M15ImportItemsComponent } from './modules/m15-import-items.component';
     M8Auditor1SaComponent,
     M9Auditor2SaComponent,
     M10AAsTableComponent,
-    M11AAuditSummaryComponent,
-    M12ARecentlyAuditComponent,
     M13CreateGroupComponent,
     M14LocationSetupComponent,
     M15ImportItemsComponent,
@@ -91,25 +87,33 @@ import { M15ImportItemsComponent } from './modules/m15-import-items.component';
           @let mod = getSelectedModule();
           @if (mod) {
             <div class="page active" [id]="'ep' + mod.idx" style="display:block;">
-              <!-- Module Enable Banner (matching tgl-row) -->
-              <div class="tgl-row" [id]="'tgl-mod-' + mod.idx" (click)="registryStore.toggleModule(mod.idx)">
+              <!-- Module Enable Banner (matching tgl-row); the combined Table · Summary · Recent page has its own switches -->
+              @let groupOn = registryStore.groupEnabled()[mod.group];
+              @if (!isCombinedPage(mod.idx)) {
+              <div class="tgl-row" [class.disabled]="!groupOn" [id]="'tgl-mod-' + mod.idx" (click)="registryStore.toggleModule(mod.idx)">
                 <div class="tgl-info">
                   <div class="tgl-icon">{{ mod.icon }}</div>
                   <div>
                     <div class="tgl-title">Enable {{ mod.display }}</div>
-                    <div class="tgl-sub">{{ mod.workflow || (mod.name + '() — execute module workflow') }}</div>
+                    @if (groupOn) {
+                      <div class="tgl-sub">{{ mod.workflow || (mod.name + '() — execute module workflow') }}</div>
+                    } @else {
+                      <div class="tgl-sub">Turn on the {{ getGroupName(mod.group) }} group in the sidebar to enable this module</div>
+                    }
                   </div>
                 </div>
                 <label class="sw" (click)="$event.stopPropagation()">
                   <input
                     type="checkbox"
                     [id]="'cb-mod-' + mod.idx"
+                    [disabled]="!groupOn"
                     [checked]="registryStore.moduleEnabled()[mod.idx]"
                     (change)="registryStore.toggleModule(mod.idx)"
                   />
                   <span class="sw-track"></span>
                 </label>
               </div>
+              }
 
               <!-- Module Sub-component Form -->
               @switch (mod.idx) {
@@ -124,35 +128,13 @@ import { M15ImportItemsComponent } from './modules/m15-import-items.component';
                 @case (8) { <app-m8-auditor1-sa /> }
                 @case (9) { <app-m9-auditor2-sa /> }
                 @case (10) { <app-m10-a-as-table /> }
-                @case (11) { <app-m11-a-audit-summary /> }
-                @case (12) { <app-m12-a-recently-audit /> }
+                @case (11) { <app-m10-a-as-table /> }
+                @case (12) { <app-m10-a-as-table /> }
                 @case (13) { <app-m13-create-group /> }
                 @case (14) { <app-m14-location-setup /> }
                 @case (15) { <app-m15-import-items /> }
               }
-
-              <!-- Bottom Module Navigation Row -->
-              <div class="nav-row" style="margin-top:20px; margin-bottom:40px;">
-                @if (mod.idx > 0) {
-                  <button type="button" class="btn btn-back" (click)="registryStore.selectModuleForEditing(mod.idx - 1)">
-                    {{ getPrevModuleName(mod.idx) }}
-                  </button>
-                } @else {
-                  <button type="button" class="btn btn-back" (click)="goToSetup()">
-                    Setup
-                  </button>
-                }
-
-                @if (mod.idx < 15) {
-                  <button type="button" class="btn btn-accent btn-lg" (click)="registryStore.selectModuleForEditing(mod.idx + 1)">
-                    {{ getNextModuleName(mod.idx) }} →
-                  </button>
-                } @else {
-                  <button type="button" class="btn btn-accent btn-lg" (click)="goToRun()">
-                    Go to Run →
-                  </button>
-                }
-              </div>
+              <!-- Back / Next navigation lives in each module's own nav-row -->
             </div>
           }
         }
@@ -160,30 +142,32 @@ import { M15ImportItemsComponent } from './modules/m15-import-items.component';
     </div>
   `
 })
-export class ExecutionComponent {
+export class ExecutionComponent implements OnInit {
   readonly registryStore = inject(ModuleRegistryStore);
+
+  ngOnInit(): void {
+    if (this.registryStore.selectedModuleIdx() === null) {
+      const enabledGroup = this.registryStore.groupEnabled().findIndex(e => e);
+      if (enabledGroup !== -1) {
+        const firstMod = this.registryStore.modules().find(m => m.group === enabledGroup);
+        if (firstMod) {
+          this.registryStore.selectModuleForEditing(firstMod.idx);
+        }
+      }
+    }
+  }
+
+  isCombinedPage(idx: number): boolean {
+    return A2_REPORT_MODULES.includes(idx);
+  }
+
+  getGroupName(groupIdx: number): string {
+    return this.registryStore.groups().find(g => g.idx === groupIdx)?.name ?? '';
+  }
 
   getSelectedModule() {
     const idx = this.registryStore.selectedModuleIdx();
     if (idx === null) return null;
-    return this.registryStore.modules().find(m => m.idx === idx) ?? null;
-  }
-
-  getPrevModuleName(currentIdx: number): string {
-    const prev = this.registryStore.modules().find(m => m.idx === currentIdx - 1);
-    return prev ? prev.display : 'Previous';
-  }
-
-  getNextModuleName(currentIdx: number): string {
-    const next = this.registryStore.modules().find(m => m.idx === currentIdx + 1);
-    return next ? next.display : 'Next';
-  }
-
-  goToSetup(): void {
-    window.dispatchEvent(new CustomEvent('navigate-tab', { detail: 'setup' }));
-  }
-
-  goToRun(): void {
-    window.dispatchEvent(new CustomEvent('navigate-tab', { detail: 'run' }));
+    return this.registryStore.modules().find(m => m.idx === idx) || this.registryStore.modules()[0] || null;
   }
 }

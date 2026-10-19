@@ -152,9 +152,9 @@ import { ModuleRegistryStore } from '../../../state/module-registry.store';
         <button
           type="button"
           class="btn btn-ghost"
-          (click)="registryStore.selectModuleForEditing(12)"
+          (click)="registryStore.selectModuleForEditing(10)"
         >
-          ← A2 Recently Audited
+          ← Table · Summary · Recent
         </button>
         <button
           type="button"

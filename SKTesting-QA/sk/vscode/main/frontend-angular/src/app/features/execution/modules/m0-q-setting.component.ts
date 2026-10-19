@@ -269,7 +269,7 @@ import { ExcelUploaderComponent } from '../components/excel-uploader/excel-uploa
 
       <!-- Navigation Row -->
       <div class="nav-row">
-        <button type="button" class="btn btn-ghost" style="visibility:hidden;">Placeholder</button>
+        <button type="button" class="btn btn-ghost" (click)="goToSetup()">← Setup</button>
         <button
           type="button"
           class="btn-primary"
@@ -284,4 +284,8 @@ import { ExcelUploaderComponent } from '../components/excel-uploader/excel-uploa
 export class M0QSettingComponent {
   readonly configStore = inject(RunConfigStore);
   readonly registryStore = inject(ModuleRegistryStore);
+
+  goToSetup(): void {
+    window.dispatchEvent(new CustomEvent('navigate-tab', { detail: 'setup' }));
+  }
 }

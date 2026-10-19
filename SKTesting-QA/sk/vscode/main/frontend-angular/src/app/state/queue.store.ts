@@ -60,7 +60,7 @@ export class QueueStore {
       ) {
         this.orderedIndices.set(nextOrder);
       }
-    });
+    }, { allowSignalWrites: true });
   }
 
   /**

@@ -1,5 +1,4 @@
 import time
-from turtle import pd
 import pandas as pd
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from login.popup_handler import detect_feedback

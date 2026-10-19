@@ -28,6 +28,7 @@ import { JsonImportService, ImportResult } from '../../core/services/json-import
                   (change)="configStore.browsername.set($any($event.target).value)"
                 >
                   <option value="chrome">Chrome</option>
+                  <option value="edge">Edge</option>
                   <option value="firefox">Firefox</option>
                   <option value="webkit">WebKit / Safari</option>
                 </select>

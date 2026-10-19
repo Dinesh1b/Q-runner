@@ -137,8 +137,9 @@ export class JsonImportService {
       for (const [key, val] of Object.entries(mods)) {
         const isEnabled = Boolean(val);
         const match = allModules.find(m => m.name === key || m.flag === key || m.display.toLowerCase() === key.toLowerCase());
-        if (match) {
-          this.registryStore.setModuleEnabled(match.idx, isEnabled);
+        if (match && !this.registryStore.setModuleEnabled(match.idx, isEnabled)) {
+          result.skipped.push({ path: `modules.${key}`, reason: 'Group is OFF — enable the group first' });
+        } else if (match) {
           result.populated.push({ path: `modules.${key}`, value: String(isEnabled), controlId: match.cb });
         } else {
           result.skipped.push({ path: `modules.${key}`, reason: 'No matching module registered in runner' });

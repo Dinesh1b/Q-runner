@@ -6,7 +6,13 @@ Serves the Angular production SPA from frontend-angular/dist/frontend-angular/br
 """
 
 import os
+import sys
 import secrets
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from flask import Flask
 from flask_cors import CORS
@@ -23,19 +29,14 @@ def create_app():
         "frontend-angular", "dist", "frontend-angular", "browser"
     )
 
-    # Determine template folder (index.html lives in the Angular dist/browser dir).
+    # index.html lives in the Angular dist/browser dir. If the build is missing the
+    # server still starts and the pages blueprint answers with a 503 "build missing".
     # We do NOT set static_folder on the Flask app itself; instead the pages blueprint
     # uses send_from_directory() for all asset serving.  This prevents Flask's built-in
     # /<path:filename> static endpoint from conflicting with our SPA fallback logic.
-    if os.path.isdir(_ANGULAR_DIST):
-        _template_folder = _ANGULAR_DIST
-    else:
-        # Angular build not present – fall back so server can still start.
-        _template_folder = os.path.join(_PROJECT_ROOT, "frontend", "templates")
-
     app = Flask(
         __name__,
-        template_folder=_template_folder,
+        template_folder=_ANGULAR_DIST,
         static_folder=None,   # asset serving handled by pages blueprint
     )
     CORS(app)

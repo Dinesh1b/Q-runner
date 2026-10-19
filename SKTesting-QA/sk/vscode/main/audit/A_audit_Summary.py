@@ -614,7 +614,9 @@ def A_audit_Summary(page, config):
 
     
 
-    sys.exit(0 if engine.summary() else 1)
+    # Return the result (like Q_audit_Summary) instead of sys.exit(), so the
+    # runner records pass/fail and continues with the next module.
+    return engine.summary()
 
 
 

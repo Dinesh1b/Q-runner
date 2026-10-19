@@ -13,7 +13,7 @@ from flask import Blueprint, request, jsonify, Response, stream_with_context
 
 from backend import logger as _logger
 from backend.logger import log_buffer, log_lock
-from backend.services.execution_engine import execute_run
+from backend.services.execution_engine import execute_run, kill_process_tree
 from backend.models.module_registry import get_module_keys
 
 runner_bp = Blueprint("runner", __name__)
@@ -23,45 +23,76 @@ runner_bp = Blueprint("runner", __name__)
 # ---------------------------------------------------------------------------
 running: bool = False
 current_run_id: str | None = None
+_stopped_run_id: str | None = None
 _state_lock = threading.Lock()
 _active_proc = None
+
+
+def _is_current(rid):
+    return current_run_id == rid
+
+
+class _RunLogger:
+    """Logger bound to one run: output from a stopped, superseded run is dropped."""
+
+    def __init__(self, rid):
+        self.rid = rid
+
+    def log(self, msg):
+        if _is_current(self.rid):
+            _logger.log(msg)
 
 
 @runner_bp.route("/run", methods=["POST"])
 def run_route():
     global running, current_run_id, _active_proc
 
+    cfg = request.get_json(silent=True)
+    if not isinstance(cfg, dict):
+        return jsonify({"error": "Request body must be a JSON object"}), 400
+
     with _state_lock:
         if running:
             return jsonify({"error": "A run is already in progress"}), 409
         running = True
+        rid = str(uuid.uuid4())[:8]
+        current_run_id = rid
+        _active_proc = None
 
-    cfg = request.get_json()
     _logger.reset()
 
-    rid = str(uuid.uuid4())[:8]
-    current_run_id = rid
-
     # Delegate to execution engine
-    total, active_modules = execute_run(
-        cfg, rid, _logger,
-        state_lock=_state_lock,
-        get_active_proc=lambda: _active_proc,
-        set_active_proc=lambda p: _set_proc(p),
-        set_running=lambda v: _set_running(v),
-    )
+    try:
+        total, active_modules = execute_run(
+            cfg, rid, _RunLogger(rid),
+            state_lock=_state_lock,
+            get_active_proc=lambda: _active_proc,
+            set_active_proc=lambda p: _set_proc(p, rid),
+            set_running=lambda v: _set_running(v, rid),
+            is_cancelled=lambda: _stopped_run_id == rid or not _is_current(rid),
+        )
+    except ValueError as e:
+        _set_running(False, rid)
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        _set_running(False, rid)
+        return jsonify({"error": f"Failed to start run: {e}"}), 500
 
     return jsonify({"status": "started", "run_id": rid, "total": total})
 
 
-def _set_proc(p):
+def _set_proc(p, rid):
+    """Called with _state_lock held."""
     global _active_proc
-    _active_proc = p
+    if _is_current(rid):
+        _active_proc = p
 
 
-def _set_running(v):
+def _set_running(v, rid):
     global running, _active_proc
     with _state_lock:
+        if not _is_current(rid):
+            return  # a newer run owns the state now
         running = v
         if not v:
             _active_proc = None
@@ -69,20 +100,14 @@ def _set_running(v):
 
 @runner_bp.route("/stop", methods=["POST"])
 def stop():
-    global running, _active_proc
-    import subprocess
+    global running, _active_proc, _stopped_run_id
 
     with _state_lock:
         proc = _active_proc
+        _stopped_run_id = current_run_id
+        _active_proc = None
 
-    if proc:
-        try:
-            proc.terminate()
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        except Exception:
-            pass
+    kill_process_tree(proc)
 
     with _state_lock:
         running = False
@@ -96,8 +121,14 @@ def stop():
 def stream():
     def generate():
         sent = 0
+        with log_lock:
+            gen = _logger.generation()
         while True:
             with log_lock:
+                if _logger.generation() != gen:
+                    # Buffer was reset for a new run — start from its first line.
+                    gen = _logger.generation()
+                    sent = 0
                 chunk = log_buffer[sent:]
             for line in chunk:
                 sent += 1

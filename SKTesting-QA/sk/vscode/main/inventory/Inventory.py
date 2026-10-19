@@ -30,7 +30,7 @@ class Config:
     environments = "production" # production, staging, development
 
     Branch = "gr"
-
+    run_create_group = False
     run_location_setup = False
     zones  = ["SA"]
     aisles = ["A1", "A2", "A3"]
@@ -38,10 +38,10 @@ class Config:
     levels = ["L1", "L2", "L3", "L4", "L5"]
 
 
-    run_create_group = False
+    
 
+    group_name = "Unit1"
 
-    group_name = "123"
     inventory_type = "Unit" # Unit, Batch , Serialized
     sheet_name = "Data"
     # input add Fields   
@@ -62,13 +62,13 @@ class Config:
 
     EXCEL_FILE: str = os.environ.get(
         "IMPORT_EXCEL_FILE",
-        #r"C:\Users\HP\Documents\input\main_qexcel.xlsx"  
-        r"C:\Users\HP\Documents\input\main_qexcel.xlsx"
+        r"C:\Users\dines\3D Objects\main_qexcel.xlsx"  
+        #r"C:\Users\HP\Documents\input\main_qexcel.xlsx"
     )
     run_add_item = False
     
     run_import_items = False
-    group_name = "unit"
+    
     # --- Add Item test record (single item, not from Excel) ---
     Item_Name     = "ab,cm12"    # Item Name   (was wrongly used as UOM before)
     Item_Code     = "itme173"    # Item Code

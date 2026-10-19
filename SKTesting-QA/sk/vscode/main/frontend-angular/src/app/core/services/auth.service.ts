@@ -1,7 +1,7 @@
 import { Injectable, inject, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Router } from '@angular/router';
-import { Observable, tap, catchError, of, map } from 'rxjs';
+import { Observable, tap, catchError, of, map, finalize, defer } from 'rxjs';
 import {
   User,
   AuthApiResponse,
@@ -49,12 +49,20 @@ export class AuthService {
     );
   }
 
+  /** Drives the existing spinner / disabled-button bindings for the duration of a request. */
+  private withLoading<T>(request: Observable<T>): Observable<T> {
+    return defer(() => {
+      this.isLoading.set(true);
+      return request;
+    }).pipe(finalize(() => this.isLoading.set(false)));
+  }
+
   signup(payload: SignupPayload): Observable<AuthApiResponse> {
-    return this.http.post<AuthApiResponse>('/auth/signup', payload);
+    return this.withLoading(this.http.post<AuthApiResponse>('/auth/signup', payload));
   }
 
   verifyOtp(payload: VerifyOtpPayload): Observable<AuthApiResponse> {
-    return this.http.post<AuthApiResponse>('/auth/verify', payload);
+    return this.withLoading(this.http.post<AuthApiResponse>('/auth/verify', payload));
   }
 
   resendOtp(email: string): Observable<AuthApiResponse> {
@@ -62,7 +70,7 @@ export class AuthService {
   }
 
   setPassword(payload: SetPasswordPayload): Observable<AuthApiResponse> {
-    return this.http.post<AuthApiResponse>('/auth/set-password', payload).pipe(
+    return this.withLoading(this.http.post<AuthApiResponse>('/auth/set-password', payload)).pipe(
       tap(res => {
         if (res.ok) {
           this.isAuthenticated.set(true);
@@ -72,7 +80,7 @@ export class AuthService {
   }
 
   login(payload: LoginPayload): Observable<AuthApiResponse> {
-    return this.http.post<AuthApiResponse>('/auth/login', payload).pipe(
+    return this.withLoading(this.http.post<AuthApiResponse>('/auth/login', payload)).pipe(
       tap(res => {
         if (res.ok) {
           this.isAuthenticated.set(true);
@@ -83,11 +91,11 @@ export class AuthService {
   }
 
   forgotPassword(payload: ForgotPasswordPayload): Observable<AuthApiResponse> {
-    return this.http.post<AuthApiResponse>('/auth/forgot-password', payload);
+    return this.withLoading(this.http.post<AuthApiResponse>('/auth/forgot-password', payload));
   }
 
   resetPassword(payload: ResetPasswordPayload): Observable<AuthApiResponse> {
-    return this.http.post<AuthApiResponse>('/auth/reset-password', payload);
+    return this.withLoading(this.http.post<AuthApiResponse>('/auth/reset-password', payload));
   }
 
   logout(): Observable<AuthApiResponse> {

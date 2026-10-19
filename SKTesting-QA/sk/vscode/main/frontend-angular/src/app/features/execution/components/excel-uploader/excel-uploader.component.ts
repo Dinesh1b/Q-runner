@@ -69,7 +69,11 @@ import { RunConfigStore } from '../../../../state/run-config.store';
             <span class="file-meta-icon">📊</span>
             <span class="file-meta-name">{{ fileName() }}</span>
             <span class="file-meta-size">({{ fileSize() }})</span>
-            <span class="file-meta-ok">✓ UPLOADED</span>
+            @if (uploaded()) {
+              <span class="file-meta-ok">✓ UPLOADED</span>
+            } @else if (isUploading()) {
+              <span class="file-meta-ok">UPLOADING…</span>
+            }
           </div>
         }
 
@@ -120,6 +124,7 @@ export class ExcelUploaderComponent {
 
   readonly isDragging = signal<boolean>(false);
   readonly isUploading = signal<boolean>(false);
+  readonly uploaded = signal<boolean>(false);
   readonly fileName = signal<string>('');
   readonly fileSize = signal<string>('');
   readonly sheets = signal<string[]>([]);
@@ -151,10 +156,11 @@ export class ExcelUploaderComponent {
     this.isUploading.set(true);
     this.errorMessage.set(null);
 
-    // Call inspect API
+    this.uploaded.set(false);
+
+    // Inspect for sheet names (independent of the upload below)
     this.uploadService.inspectAuditExcel(file).subscribe({
       next: (res: InspectExcelResult) => {
-        this.isUploading.set(false);
         if (res.ok && res.sheet_names?.length) {
           this.sheets.set(res.sheet_names);
           this.sheetsLoaded.emit(res.sheet_names);
@@ -163,31 +169,30 @@ export class ExcelUploaderComponent {
           if (!this.selectedSheet() || !res.sheet_names.includes(this.selectedSheet())) {
             this.sheetChange.emit(defaultSheet);
           }
+        } else if (res.errors?.length) {
+          this.errorMessage.set(res.errors.join(' '));
         }
       },
-      error: () => {
-        // Fallback: regular upload
-        this.uploadService.uploadFile(file).subscribe({
-          next: (res) => {
-            this.isUploading.set(false);
-            if (res.path) {
-              this.configStore.setUploadedPath(this.storageKey(), res.path);
-            }
-          },
-          error: (err) => {
-            this.isUploading.set(false);
-            this.errorMessage.set(err.message || 'File upload failed');
-          }
-        });
+      error: (err) => {
+        const errors: string[] | undefined = err.error?.errors;
+        this.errorMessage.set(errors?.length ? errors.join(' ') : 'Could not read sheets from this file');
       }
     });
 
-    // Also persist uploaded path
+    // Upload once and persist the stored path
     this.uploadService.uploadFile(file).subscribe({
       next: (res) => {
+        this.isUploading.set(false);
         if (res.path) {
           this.configStore.setUploadedPath(this.storageKey(), res.path);
+          this.uploaded.set(true);
+        } else {
+          this.errorMessage.set(res.error || 'File upload failed');
         }
+      },
+      error: (err) => {
+        this.isUploading.set(false);
+        this.errorMessage.set(err.error?.error || err.message || 'File upload failed');
       }
     });
   }

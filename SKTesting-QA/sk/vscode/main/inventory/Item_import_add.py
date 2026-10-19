@@ -84,20 +84,53 @@ EDIT_FORM_FIELDS: List[Tuple[str, str, str]] = [
 # ---------------------------
 # Select Item Group Dropdown
 # ---------------------------
+def _open_item_group_panel(page: Page, group_field, panel, attempts: int = 3) -> None:
+    """
+    Open the Item Group p-dropdown and confirm its panel is visible.
+    A single click can be lost while the Inventory page is still rendering the
+    dropdown, so each attempt verifies the panel and retries with a different
+    way of opening it (trigger click → label click → keyboard).
+    """
+    trigger = group_field.locator("[role='button'][aria-label='dropdown trigger']")
+    label = group_field.locator("span[role='combobox']")
+    openers = [
+        lambda: trigger.click(),
+        lambda: label.click(),
+        lambda: (label.focus(), page.keyboard.press("Enter")),
+    ]
+    for attempt in range(attempts):
+        if panel.is_visible():
+            return
+        openers[attempt % len(openers)]()
+        try:
+            panel.wait_for(state="visible", timeout=5_000)
+            return
+        except PWTimeout:
+            log.warning("Item Group dropdown did not open (attempt %d/%d), retrying", attempt + 1, attempts)
+    raise PWTimeout(f"Item Group dropdown panel did not open after {attempts} attempts")
+
+
 def select_item_group(page: Page, group_name: str) -> None:
     group_field = page.locator(
         "app-group-select-dropdown[placeholder='Select Item Group']"
     )
-    trigger = group_field.locator("[role='button'][aria-label='dropdown trigger']")
+    label = group_field.locator("span[role='combobox']")
+    label.wait_for(state="visible", timeout=15_000)
 
-    # Only click to open if not already expanded — avoids toggling it shut
-    if trigger.get_attribute("aria-expanded") != "true":
-        trigger.click()
+    # Already selected → nothing to do (selecting it again just toggles the panel)
+    if label.inner_text().strip() == group_name:
+        log.info("Item Group '%s' already selected", group_name)
+        return
 
-    panel = page.locator("div.p-dropdown-panel")
-    panel.wait_for(state="visible")
+    # The panel is appended to <body>; scope it to THIS dropdown via its listbox id
+    # so other PrimeNG panels on the page can't be matched.
+    list_id = label.get_attribute("aria-controls") or "itemgroup_list"
+    panel = page.locator("div.p-dropdown-panel").filter(has=page.locator(f"ul[id='{list_id}']"))
 
-    option_list = panel.locator("ul#itemgroup_list li[role='option']")
+    _open_item_group_panel(page, group_field, panel)
+
+    option_list = panel.locator("li[role='option']")
+    option_list.first.wait_for(state="attached", timeout=10_000)
     initial_count = option_list.count()
 
     search_input = panel.locator("input[placeholder='Search Item Group']")
@@ -110,13 +143,27 @@ def select_item_group(page: Page, group_name: str) -> None:
             # Filter isn't wired — clear it and fall back to full-list scan
             search_input.fill("")
 
-    option = panel.get_by_text(group_name, exact=True)
+    # Options carry the group name as their accessible name (aria-label)
+    option = panel.get_by_role("option", name=group_name, exact=True)
+    if option.count() == 0:
+        # Report the full list so a wrong Config.group_name is obvious
+        if search_input.count() > 0:
+            search_input.fill("")
+            try:
+                expect(option_list).to_have_count(initial_count, timeout=1_500)
+            except AssertionError:
+                pass
+        available = [
+            (option_list.nth(i).get_attribute("aria-label") or "").strip()
+            for i in range(option_list.count())
+        ]
+        page.keyboard.press("Escape")
+        raise ValueError(f"Item Group '{group_name}' not found. Available groups: {available}")
     option.click()
 
     panel.wait_for(state="hidden")
 
-    selected_label = group_field.locator("span[role='combobox']")
-    expect(selected_label).to_have_text(group_name)
+    expect(label).to_have_text(group_name)
 # ==================================================
 # UTILITIES
 # ==================================================

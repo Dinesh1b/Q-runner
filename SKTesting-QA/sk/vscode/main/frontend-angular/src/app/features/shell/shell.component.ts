@@ -1,4 +1,4 @@
-import { Component, inject, signal, OnInit } from '@angular/core';
+import { Component, inject, signal, OnInit, OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { NavComponent, MainTab } from '../../shared/components/nav/nav.component';
 import { SidebarComponent } from '../../shared/components/sidebar/sidebar.component';
@@ -110,8 +110,8 @@ import { CdkDragDrop, DragDropModule } from '@angular/cdk/drag-drop';
                     ◼ Stop
                   </button>
                 }
-                @if (!sessionStore.isRunning() && sessionStore.runId()) {
-                  <button type="button" class="btn btn-violet" id="run-rerun-btn" (click)="sessionStore.startRun()">
+                @if (!sessionStore.isActive() && sessionStore.runId()) {
+                  <button type="button" class="btn btn-violet" id="run-rerun-btn" [disabled]="queueStore.queueCount() === 0" (click)="sessionStore.startRun()">
                     ↺ Re-run
                   </button>
                 }
@@ -175,7 +175,7 @@ import { CdkDragDrop, DragDropModule } from '@angular/cdk/drag-drop';
                   type="button"
                   class="run-big-btn"
                   id="run-now-btn"
-                  [disabled]="queueStore.queueCount() === 0"
+                  [disabled]="queueStore.queueCount() === 0 || sessionStore.isActive()"
                   (click)="sessionStore.startRun()"
                 >
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
@@ -280,10 +280,12 @@ import { CdkDragDrop, DragDropModule } from '@angular/cdk/drag-drop';
                     <div class="err-icon">⛔</div>
                     <div class="err-msg" id="run-err-msg">{{ sessionStore.errorMessage() }}</div>
                     <div class="err-acts">
-                      <button type="button" class="btn btn-rose" style="font-size:8.5px; padding:5px 12px;" (click)="sessionStore.stopRun()">
-                        ✕ Stop
-                      </button>
-                      <button type="button" class="btn btn-ghost" style="font-size:8.5px; padding:5px 12px;" (click)="sessionStore.startRun()">
+                      @if (sessionStore.isRunning()) {
+                        <button type="button" class="btn btn-rose" style="font-size:8.5px; padding:5px 12px;" (click)="sessionStore.stopRun()">
+                          ✕ Stop
+                        </button>
+                      }
+                      <button type="button" class="btn btn-ghost" style="font-size:8.5px; padding:5px 12px;" [disabled]="queueStore.queueCount() === 0 || sessionStore.isActive()" (click)="sessionStore.startRun()">
                         ↺ Re-run
                       </button>
                     </div>
@@ -304,7 +306,7 @@ import { CdkDragDrop, DragDropModule } from '@angular/cdk/drag-drop';
     </div>
   `
 })
-export class ShellComponent implements OnInit {
+export class ShellComponent implements OnInit, OnDestroy {
   readonly registryStore = inject(ModuleRegistryStore);
   readonly queueStore = inject(QueueStore);
   readonly sessionStore = inject(RunSessionStore);
@@ -313,14 +315,20 @@ export class ShellComponent implements OnInit {
   readonly activeTab = signal<MainTab>('setup');
   readonly setupStep = signal<number>(0);
 
+  private readonly onNavigateTab = (e: Event): void => {
+    const customEvent = e as CustomEvent<MainTab>;
+    if (customEvent.detail) {
+      this.activeTab.set(customEvent.detail);
+    }
+  };
+
   ngOnInit(): void {
     this.registryStore.loadModules();
-    window.addEventListener('navigate-tab', (e: Event) => {
-      const customEvent = e as CustomEvent<MainTab>;
-      if (customEvent.detail) {
-        this.activeTab.set(customEvent.detail);
-      }
-    });
+    window.addEventListener('navigate-tab', this.onNavigateTab);
+  }
+
+  ngOnDestroy(): void {
+    window.removeEventListener('navigate-tab', this.onNavigateTab);
   }
 
   getExecStepLabel(): string {

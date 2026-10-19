@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 
 from backend.models.module_registry import (
+    get_all_modules,
     get_module_keys,
     get_idx_to_flag_map,
     get_flag_to_idx_map,
@@ -48,6 +49,22 @@ def _default_active_modules(cfg, MODULE_KEYS, idx6_flags, flag_to_name):
     return active_modules
 
 
+GROUP_FLAGS = {0: "run_Q_audit", 1: "run_Audit_plan", 2: "run_inventory"}
+
+
+def _disable_modules_in_off_groups(cfg, idx6_flags):
+    """A group switched OFF means none of its modules may run, whatever their own flags say."""
+    for m in get_all_modules():
+        group_flag = GROUP_FLAGS.get(m["group"])
+        if group_flag not in cfg or _is_true(cfg[group_flag]):
+            continue
+        flags = [m["flag"]] + ([m["alt_flag"]] if m.get("alt_flag") else [])
+        if m["idx"] == 6:
+            flags += idx6_flags
+        for f in flags:
+            cfg[f] = False
+
+
 def _is_true(v):
     if isinstance(v, bool):
         return v
@@ -56,25 +73,61 @@ def _is_true(v):
     return bool(v)
 
 
-def execute_run(cfg, rid, logger, state_lock, get_active_proc, set_active_proc, set_running):
+class NoModulesEnabled(ValueError):
+    """Raised when a run request has no enabled module to execute."""
+
+
+def kill_process_tree(proc):
+    """Terminate a runner process together with its Playwright driver / browser children."""
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                capture_output=True,
+                timeout=15,
+            )
+        else:
+            proc.terminate()
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def execute_run(cfg, rid, logger, state_lock, get_active_proc, set_active_proc, set_running,
+                is_cancelled=lambda: False):
     """
     Prepare and launch the automation run in a background thread.
     Returns (total_modules, active_modules_list).
+    Raises ValueError for an invalid payload and NoModulesEnabled when nothing would run.
     """
+    if not isinstance(cfg, dict):
+        raise ValueError("Run configuration must be a JSON object")
+
     MODULE_KEYS = get_module_keys()
     idx_to_flag = get_idx_to_flag_map()
     flag_to_idx = get_flag_to_idx_map()
     name_to_flag = {name: key for key, name in MODULE_KEYS}
     flag_to_name = {key: name for key, name in MODULE_KEYS}
 
-    # Coerce all module flags to real booleans early.
-    for key, _ in MODULE_KEYS:
-        if key in cfg:
-            cfg[key] = _is_true(cfg.get(key))
+    # Special case: idx 6 covers Audit_Plan (timezone/create/update) OR Ad_hoc
+    idx6_flags = ("run_create_audit", "run_create_Ad_hoc_Audit", "run_timezone", "run_update_audit")
 
     # Handle legacy key: run_locatio_setup → run_location_setup
     if "run_locatio_setup" in cfg and "run_location_setup" not in cfg:
         cfg["run_location_setup"] = cfg.pop("run_locatio_setup")
+
+    # Coerce all module flags (and idx 6 sub-flags) to real booleans early.
+    for key in [k for k, _ in MODULE_KEYS] + list(idx6_flags):
+        if key in cfg:
+            cfg[key] = _is_true(cfg.get(key))
 
     # Normalise cfg.modules → boolean flags (backward compat)
     modules_list = cfg.get("modules")
@@ -83,8 +136,7 @@ def execute_run(cfg, rid, logger, state_lock, get_active_proc, set_active_proc, 
             if isinstance(item, str) and item in name_to_flag:
                 cfg[name_to_flag[item]] = True
 
-    # Special case: idx 6 covers Audit_Plan (timezone/create/update) OR Ad_hoc
-    idx6_flags = ("run_create_audit", "run_create_Ad_hoc_Audit", "run_timezone", "run_update_audit")
+    _disable_modules_in_off_groups(cfg, idx6_flags)
 
     def _idx6_enabled(cfg: dict) -> bool:
         return any(cfg.get(f) for f in idx6_flags)
@@ -121,14 +173,42 @@ def execute_run(cfg, rid, logger, state_lock, get_active_proc, set_active_proc, 
     else:
         active_modules = _default_active_modules(cfg, MODULE_KEYS, idx6_flags, flag_to_name)
 
-    total = max(len(active_modules), 1)
+    if not active_modules:
+        raise NoModulesEnabled("No modules enabled — enable at least one module in an active group")
+
+    total = len(active_modules)
+
+    def _launch(launch_cmd, env):
+        """Start the runner process unless the run was stopped; returns None when cancelled."""
+        if is_cancelled():
+            return None
+        proc = subprocess.Popen(
+            launch_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=_BASE,
+            env=env,
+            bufsize=1,
+        )
+        with state_lock:
+            set_active_proc(proc)
+            cancelled = is_cancelled()
+        if cancelled:
+            # /stop arrived while the process was being created.
+            kill_process_tree(proc)
+            return None
+        return proc
 
     def execute():
-        from backend.services.db import db_insert_step, db_finish_run
+        from backend.services.db import db_start_run, db_insert_step, db_finish_run
         from backend.services.config_builder import build_config_py
         terminal_marker = "__ERROR__"
 
         try:
+            db_start_run(rid)
             logger.log(json.dumps({
                 "type": "init",
                 "run_id": rid,
@@ -150,22 +230,14 @@ def execute_run(cfg, rid, logger, state_lock, get_active_proc, set_active_proc, 
 
                 env = dict(os.environ)
                 env["PYTHONUNBUFFERED"] = "1"
+                env["PYTHONIOENCODING"] = "utf-8"
+                env["PYTHONUTF8"] = "1"
                 env["QA_RUNNER_CONFIG_PATH"] = runtime_cfg_path
 
-                proc = subprocess.Popen(
-                    launch_cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    cwd=_BASE,
-                    env=env,
-                    bufsize=1,
-                )
-
-                with state_lock:
-                    set_active_proc(proc)
+                proc = _launch(launch_cmd, env)
+                if proc is None:
+                    db_finish_run(rid, "stopped")
+                    return
 
                 for line in iter(proc.stdout.readline, ""):
                     stripped = line.rstrip()
@@ -173,14 +245,20 @@ def execute_run(cfg, rid, logger, state_lock, get_active_proc, set_active_proc, 
 
                 proc.wait()
 
+                if is_cancelled():
+                    db_finish_run(rid, "stopped")
+                    return
+
                 if proc.returncode != 0:
-                    logger.log(f" Aborted: flow failed (exit {proc.returncode})")
+                    logger.log(f" Run finished with failures (exit {proc.returncode})")
+                    db_insert_step(rid, "Full flow", "error", 100)
                     db_finish_run(rid, "error")
                     return
 
                 db_insert_step(rid, "Full flow", "done", 100)
             else:
                 done_count = 0
+                failed_modules = []
                 for flag, mname in active_modules:
                     module_cfg = dict(cfg)
                     for k, _ in MODULE_KEYS:
@@ -213,22 +291,14 @@ def execute_run(cfg, rid, logger, state_lock, get_active_proc, set_active_proc, 
 
                     env = dict(os.environ)
                     env["PYTHONUNBUFFERED"] = "1"
+                    env["PYTHONIOENCODING"] = "utf-8"
+                    env["PYTHONUTF8"] = "1"
                     env["QA_RUNNER_CONFIG_PATH"] = runtime_cfg_path
 
-                    proc = subprocess.Popen(
-                        launch_cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                        cwd=_BASE,
-                        env=env,
-                        bufsize=1,
-                    )
-
-                    with state_lock:
-                        set_active_proc(proc)
+                    proc = _launch(launch_cmd, env)
+                    if proc is None:
+                        db_finish_run(rid, "stopped")
+                        return
 
                     module_failed = False
                     for line in iter(proc.stdout.readline, ""):
@@ -242,13 +312,19 @@ def execute_run(cfg, rid, logger, state_lock, get_active_proc, set_active_proc, 
 
                     proc.wait()
 
-                    if proc.returncode != 0 or module_failed:
-                        logger.log(f" Aborted: {mname} failed (exit {proc.returncode})")
-                        db_finish_run(rid, "error")
+                    if is_cancelled():
+                        db_finish_run(rid, "stopped")
                         return
 
                     done_count = min(done_count + 1, total)
                     pct = int(done_count / total * 100)
+
+                    # A failed module is recorded and the remaining modules still run.
+                    step_status = "done"
+                    if proc.returncode != 0 or module_failed:
+                        logger.log(f"[FAIL]  {mname} failed (exit {proc.returncode}) — continuing with next module")
+                        failed_modules.append(mname)
+                        step_status = "error"
 
                     logger.log(json.dumps({
                         "type": "progress",
@@ -258,7 +334,13 @@ def execute_run(cfg, rid, logger, state_lock, get_active_proc, set_active_proc, 
                         "total": total,
                     }))
 
-                    db_insert_step(rid, mname, "done", pct)
+                    db_insert_step(rid, mname, step_status, pct)
+
+                if failed_modules:
+                    logger.log("─" * 52)
+                    logger.log(f" Run finished with failures: {', '.join(failed_modules)}")
+                    db_finish_run(rid, "error")
+                    return
 
             logger.log("─" * 52)
             logger.log("[OK] Run completed successfully.")

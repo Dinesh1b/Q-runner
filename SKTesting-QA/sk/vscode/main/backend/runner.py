@@ -11,6 +11,12 @@ import importlib
 import importlib.util
 from pathlib import Path
 
+# Ensure UTF-8 output encoding across platforms (prevents Windows cp1252 charmap errors)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # Ensure project root is on sys.path
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.abspath(os.path.join(_HERE, ".."))
@@ -106,40 +112,76 @@ def _is_enabled(idx):
     return False
 
 
+PASSED, FAILED, SKIPPED = "PASSED", "FAILED", "SKIPPED"
+
+
+def _run_isolated(fn):
+    """
+    Run one module so that its failure cannot stop the modules after it.
+    Returns (status, detail). Workflows that call sys.exit() or return False count as failed.
+    """
+    try:
+        result = fn()
+    except SystemExit as e:
+        if e.code in (None, 0):
+            return PASSED, ""
+        return FAILED, f"exited with code {e.code}"
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return FAILED, f"{type(e).__name__}: {e}"
+    if result is False:
+        return FAILED, "workflow reported failure"
+    return PASSED, ""
+
+
+def _print_summary(results):
+    print("─" * 52)
+    counts = {s: sum(1 for _, st, _ in results if st == s) for s in (PASSED, FAILED, SKIPPED)}
+    print(f"[SUMMARY] passed={counts[PASSED]} failed={counts[FAILED]} skipped={counts[SKIPPED]}")
+    for name, status, detail in results:
+        print(f"  [{status}] {name}" + (f" — {detail}" if detail else ""))
+
+
 def main():
     all_modules = get_all_modules()
     # Build module index → definition lookup
     idx_to_module = {m["idx"]: m for m in all_modules}
+    results = []
 
     with sync_playwright() as p:
-        print("Logging in (Auditor 1)...")
-        browser, page = login(
-            p,
-            browser_name=Config.browsername,
-            environment=Config.environments,
-            email=Config.email,
-            password=Config.password,
-        )
+        browser, page = None, None
+        current_session = None
 
-        current_session = "auditor1"
+        def close_session():
+            nonlocal browser, page, current_session
+            if browser:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+            browser, page, current_session = None, None, None
 
         def ensure_session(session_type):
             nonlocal browser, page, current_session
-            if current_session == session_type:
+            if current_session == session_type and page is not None and not page.is_closed():
                 return
 
-            print(f"Switching session to: {session_type}")
-            browser.close()
+            if browser:
+                print(f"Switching session to: {session_type}")
+            close_session()
 
             cred_email = Config.email if session_type == "auditor1" else Config.email2
             cred_pass = Config.password if session_type == "auditor1" else Config.password2
 
+            print(f"Logging in ({session_type})...")
             browser, page = login(
                 p,
                 browser_name=Config.browsername,
                 environment=Config.environments,
                 email=cred_email,
                 password=cred_pass,
+                company_name=getattr(Config, "company_name", None),
             )
             page.set_default_timeout(45000)
             current_session = session_type
@@ -160,6 +202,20 @@ def main():
                     wf(page, Config)
                 return
 
+        def run_one(idx, mod_def):
+            # Determine session
+            ensure_session(mod_def.get("session", "auditor1"))
+
+            # Special case: idx 6 has Audit Plan / Ad-hoc branching
+            if idx == 6:
+                return run_create_audit()
+            wf_func = _load_workflow(mod_def["workflow"])
+            # Some workflows take (page, Config), some take just (page)
+            # Location setup (idx 14) only takes page
+            if idx == 14:
+                return wf_func(page)
+            return wf_func(page, Config)
+
         try:
             order = _enabled_order()
             for idx in order:
@@ -168,27 +224,25 @@ def main():
                     continue
 
                 print(f"Running module index: {idx} ({mod_def['display']})")
+                status, detail = _run_isolated(lambda: run_one(idx, mod_def))
+                results.append((mod_def["display"], status, detail))
 
-                # Determine session
-                session_type = mod_def.get("session", "auditor1")
-                ensure_session(session_type)
+                if status == FAILED:
+                    print(f"[FAIL] {mod_def['display']}: {detail} — continuing with next module")
+                    # Start the next module from a clean, freshly logged-in browser.
+                    close_session()
 
-                # Special case: idx 6 has Audit Plan / Ad-hoc branching
-                if idx == 6:
-                    run_create_audit()
-                else:
-                    wf_func = _load_workflow(mod_def["workflow"])
-                    # Some workflows take (page, Config), some take just (page)
-                    # Location setup (idx 14) only takes page
-                    if idx == 14:
-                        wf_func(page)
-                    else:
-                        wf_func(page, Config)
-
-            print("Automation completed successfully.")
+            for m in all_modules:
+                if m["idx"] not in order:
+                    results.append((m["display"], SKIPPED, "not enabled"))
         finally:
-            if browser:
-                browser.close()
+            close_session()
+
+    _print_summary(results)
+    if any(status == FAILED for _, status, _ in results):
+        print("Automation completed with failures.")
+        sys.exit(1)
+    print("Automation completed successfully.")
 
 
 if __name__ == "__main__":

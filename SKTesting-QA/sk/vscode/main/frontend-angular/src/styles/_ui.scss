@@ -204,6 +204,8 @@ option { background: var(--bg-body); color: var(--t0); }
 .tgl-row:has(input:checked) { border-color: var(--tgl-active-border); background: var(--tgl-active-bg); }
 .tgl-row.on:hover,
 .tgl-row:has(input:checked):hover { border-color: rgba(16,185,129,0.45); background: rgba(16,185,129,0.14); }
+.tgl-row.disabled { opacity: 0.5; cursor: not-allowed; }
+.tgl-row.disabled .sw { pointer-events: none; }
 .tgl-info { display: flex; align-items: center; gap: 11px; }
 .tgl-icon {
   width: 36px; height: 36px; border-radius: 10px;

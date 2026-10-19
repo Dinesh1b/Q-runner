@@ -1,6 +1,6 @@
 import { Component, inject, input, output } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { ModuleRegistryStore } from '../../../state/module-registry.store';
+import { ModuleRegistryStore, A2_REPORT_MODULES } from '../../../state/module-registry.store';
 import { RunSessionStore } from '../../../state/run-session.store';
 import { MainTab } from '../nav/nav.component';
 
@@ -118,15 +118,15 @@ import { MainTab } from '../nav/nav.component';
 
               @if (registryStore.groupExpanded()[1]) {
                 <div class="sb-grp-body" id="sgbody-1" style="display:block;">
-                  @for (mod of getGroupModules(1); track mod.idx) {
+                  @for (mod of getSidebarModules(1); track mod.idx) {
                     <div
                       class="sb-sub audit-sub"
                       [id]="'emr-' + mod.idx"
-                      [class.active]="registryStore.selectedModuleIdx() === mod.idx"
+                      [class.active]="isActive(mod.idx)"
                       (click)="registryStore.selectModuleForEditing(mod.idx)"
                     >
                       <span class="sb-sub-icon">{{ mod.icon }}</span>
-                      <span class="sb-sub-nm">{{ mod.display }}</span>
+                      <span class="sb-sub-nm">{{ sidebarLabel(mod) }}</span>
                     </div>
                   }
                 </div>
@@ -241,5 +241,25 @@ export class SidebarComponent {
 
   getGroupModules(groupIdx: number) {
     return this.registryStore.modules().filter(m => m.group === groupIdx);
+  }
+
+  /** Like getGroupModules, but Table · Summary · Recent share one entry (the first of them). */
+  getSidebarModules(groupIdx: number) {
+    return this.getGroupModules(groupIdx).filter(m => !A2_REPORT_MODULES.slice(1).includes(m.idx));
+  }
+
+  sidebarLabel(mod: { idx: number; display: string }): string {
+    if (mod.idx !== A2_REPORT_MODULES[0]) return mod.display;
+    return A2_REPORT_MODULES
+      .map(idx => this.registryStore.modules().find(m => m.idx === idx)?.display)
+      .filter(Boolean)
+      .join(' · ');
+  }
+
+  isActive(idx: number): boolean {
+    const selected = this.registryStore.selectedModuleIdx();
+    if (selected === null) return false;
+    if (idx === A2_REPORT_MODULES[0]) return A2_REPORT_MODULES.includes(selected);
+    return selected === idx;
   }
 }

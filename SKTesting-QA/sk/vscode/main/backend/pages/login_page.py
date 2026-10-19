@@ -99,8 +99,11 @@ def _launch_browser(playwright, browser_name):
     elif browser_name == "firefox":
         browser = playwright.firefox.launch(headless=False, slow_mo=200)
         context = browser.new_context(viewport=None)
+    elif browser_name == "webkit":
+        browser = playwright.webkit.launch(headless=False, slow_mo=200)
+        context = browser.new_context(viewport=None)
     else:
-        raise ValueError("Invalid browser_name: use edge/chrome/firefox")
+        raise ValueError("Invalid browser_name: use edge/chrome/firefox/webkit")
     return browser, context
 
 
@@ -116,13 +119,18 @@ def login(playwright, browser_name="chrome", environment="QA", email=None, passw
         config["password"] = password
 
     browser, context = _launch_browser(playwright, browser_name)
-    page = context.new_page()
+    try:
+        page = context.new_page()
 
-    login_page = LoginPage(page, base_url=config["url"])
-    login_page.open()
-    login_page.login(config["email"], config["password"])
-    login_page.select_company_if_prompted(company_name)
-    login_page.assert_dashboard_loaded()
+        login_page = LoginPage(page, base_url=config["url"])
+        login_page.open()
+        login_page.login(config["email"], config["password"])
+        login_page.select_company_if_prompted(company_name)
+        login_page.assert_dashboard_loaded()
+    except BaseException:
+        # Don't leave an orphaned browser window behind when login fails.
+        browser.close()
+        raise
 
     print(f"Logged in -> {env} using {browser_name.upper()}")
     print(f"Login successful | email: {config['email']}")
