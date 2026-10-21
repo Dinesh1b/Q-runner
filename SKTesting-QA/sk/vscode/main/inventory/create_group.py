@@ -131,6 +131,11 @@ def select_prime_dropdown(
             dropdown = page.locator(
                 f"{component} p-dropdown[formcontrolname='{form_control_name}']:visible"
             )
+    elif component == "app-uom-conversions":
+        dropdown = page.locator(
+            "app-add-edit-item-group .tab-panel:visible "
+            f"{component} p-dropdown[formcontrolname='{form_control_name}']"
+        )
     else:
         dropdown = page.locator(
             f"{component} p-dropdown[formcontrolname='{form_control_name}']"
@@ -186,7 +191,8 @@ def set_accounting_mode(page: Page, mode_name: str) -> None:
     open_item_group_tab(page, "Accounting")
     button = page.get_by_role("button", name=mode_name, exact=True)
     expect(button).to_be_visible()
-    button.click()
+    if not re.search(r"\bactive\b", button.get_attribute("class") or ""):
+        button.click()
     expect(button).to_have_class(re.compile(r"\bactive\b"))
 
 
@@ -194,6 +200,7 @@ def set_uom_conversions_enabled(page: Page, enabled: bool) -> None:
     """Set the PrimeNG Enable UOM Conversions switch."""
     open_item_group_tab(page, "UOM Conversions")
     switch_component = page.locator(
+        "app-add-edit-item-group .tab-panel:visible "
         "app-uom-conversions p-inputswitch[formcontrolname='enabled']"
     )
     hidden_input = switch_component.locator("input[type='checkbox'][role='switch']")
@@ -204,17 +211,22 @@ def set_uom_conversions_enabled(page: Page, enabled: bool) -> None:
     expect(hidden_input).to_be_checked() if enabled else expect(hidden_input).not_to_be_checked()
 
     if enabled:
-        expect(page.get_by_text("UOM conversions are disabled. Only the Primary UOM will be used.", exact=True)).to_have_count(0)
+        expect(page.locator(
+            "app-add-edit-item-group .tab-panel:visible "
+            "app-uom-conversions .uom-disabled-banner"
+        )).to_have_count(0)
     else:
-        expect(page.get_by_text(
-            "UOM conversions are disabled. Only the Primary UOM will be used.",
-            exact=True
-        )).to_be_visible()
+        expect(page.locator(
+            "app-add-edit-item-group .tab-panel:visible "
+            "app-uom-conversions .uom-disabled-banner"
+        )).to_contain_text("Only the Primary UOM will be used.")
 
 
 def add_secondary_uom(page: Page) -> None:
     open_item_group_tab(page, "UOM Conversions")
-    rows = page.locator("app-uom-conversions .uom-picker-row")
+    rows = page.locator(
+        "app-add-edit-item-group .tab-panel:visible app-uom-conversions .uom-picker-row"
+    )
     before = rows.count()
     button = page.get_by_role("button", name=re.compile(r"Add Secondary UOM", re.I))
     expect(button).to_be_visible()
@@ -237,7 +249,9 @@ def add_tertiary_uom(page: Page) -> None:
 def assert_uom_preview_empty(page: Page) -> None:
     """Check the known initial preview state shown in the supplied DOM."""
     open_item_group_tab(page, "UOM Conversions")
-    expect(page.locator(".uom-preview-empty")).to_have_text(
+    expect(page.locator(
+        "app-add-edit-item-group .tab-panel:visible .uom-preview-empty"
+    )).to_have_text(
         "No Secondary or Tertiary UOMs configured yet."
     )
 
