@@ -116,9 +116,25 @@ def select_prime_dropdown(
     Select a PrimeNG dropdown option scoped by its Angular form control.
     Works for the supplied UOM and accounting dropdown patterns.
     """
-    dropdown = page.locator(
-        f"{component} p-dropdown[formcontrolname='{form_control_name}']"
-    )
+    if component == "app-add-edit-item-group":
+        # Accounting renders controls for both modes. Prefer the currently active
+        # mode's dropdown when the requested control belongs to that mode.
+        active_mode = page.locator(
+            "app-add-edit-item-group .accounting-mode-block.active"
+        )
+        mode_dropdown = active_mode.locator(
+            f"p-dropdown[formcontrolname='{form_control_name}']"
+        )
+        if mode_dropdown.count() == 1:
+            dropdown = mode_dropdown
+        else:
+            dropdown = page.locator(
+                f"{component} p-dropdown[formcontrolname='{form_control_name}']:visible"
+            )
+    else:
+        dropdown = page.locator(
+            f"{component} p-dropdown[formcontrolname='{form_control_name}']"
+        )
     expect(dropdown).to_have_count(1)
     expect(dropdown).to_be_visible()
     expect(dropdown).to_have_class(re.compile(r"p-inputwrapper"))
@@ -198,18 +214,24 @@ def set_uom_conversions_enabled(page: Page, enabled: bool) -> None:
 
 def add_secondary_uom(page: Page) -> None:
     open_item_group_tab(page, "UOM Conversions")
+    rows = page.locator("app-uom-conversions .uom-picker-row")
+    before = rows.count()
     button = page.get_by_role("button", name=re.compile(r"Add Secondary UOM", re.I))
     expect(button).to_be_visible()
     expect(button).to_be_enabled()
     button.click()
+    expect(rows).to_have_count(before + 1)
 
 
 def add_tertiary_uom(page: Page) -> None:
     open_item_group_tab(page, "UOM Conversions")
+    rows = page.locator("app-uom-conversions .uom-picker-row")
+    before = rows.count()
     button = page.get_by_role("button", name=re.compile(r"Add Tertiary UOM", re.I))
     expect(button).to_be_visible()
     expect(button).to_be_enabled()
     button.click()
+    expect(rows).to_have_count(before + 1)
 
 
 def assert_uom_preview_empty(page: Page) -> None:
@@ -239,6 +261,55 @@ def save_item_group(page: Page) -> None:
     # Do not infer success from clicking. The caller should assert the actual toast,
     # navigation, or saved row according to the app's observed success behavior.
     log.info("Submitted Item Group form; verify the application's success signal.")
+
+
+
+def configure_accounting(
+    page: Page,
+    accounts: Optional[dict[str, str]] = None,
+    *,
+    mode: str = "Basic Accounting Mode",
+    costing_method: Optional[str] = None,
+) -> None:
+    """Configure supported Accounting controls from formcontrolname to visible option label."""
+    open_item_group_tab(page, "Accounting")
+    set_accounting_mode(page, mode)
+    if costing_method:
+        select_costing_method(page, costing_method)
+    for control_name, option_label in (accounts or {}).items():
+        select_prime_dropdown(page, control_name, option_label)
+
+
+def configure_advanced_toggles(page: Page, toggles: dict[str, bool]) -> None:
+    """Apply explicitly supplied Advanced toggle values; never assume defaults."""
+    open_item_group_tab(page, "Advanced")
+    for control_name, enabled in toggles.items():
+        set_checkbox(page, control_name, enabled)
+
+
+def inspect_label_configuration_controls(page: Page) -> list[dict[str, str]]:
+    """
+    Capture visible Label Configuration controls to help ground selectors.
+    Diagnostic only: it intentionally does not guess field semantics.
+    """
+    open_item_group_tab(page, "Label Configuration")
+    panel = _visible_tab_panel(page)
+    controls = panel.locator("input, select, textarea, button, p-dropdown")
+    snapshot: list[dict[str, str]] = []
+    for index in range(controls.count()):
+        control = controls.nth(index)
+        if not control.is_visible():
+            continue
+        snapshot.append({
+            "tag": control.evaluate("(el) => el.tagName.toLowerCase()"),
+            "formcontrolname": control.get_attribute("formcontrolname") or "",
+            "name": control.get_attribute("name") or "",
+            "placeholder": control.get_attribute("placeholder") or "",
+            "aria_label": control.get_attribute("aria-label") or "",
+            "text": (control.inner_text() or "").strip()[:160],
+        })
+    log.info("Label Configuration controls: %s", snapshot)
+    return snapshot
 
 
 def assert_disabled_advanced_options(page: Page) -> None:
