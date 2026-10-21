@@ -30,7 +30,7 @@ class Config:
     environments = "production" # production, staging, development
 
     Branch = "gr"
-    run_create_group = False
+    run_create_group = True
     run_location_setup = False
     zones  = ["SA"]
     aisles = ["A1", "A2", "A3"]
@@ -56,9 +56,29 @@ class Config:
         "IMEI",
         "Barcode"
     ]
- 
+
+    # Accounting tab (accounts: formcontrolname -> account name)
+    accounting_mode = "Basic Accounting Mode"
+    costing_method = "Weighted Average"
+
+    accounting_accounts = {
+        "SaleAccountId": "Sales Revenue",
+        "PurchaseAccountId": "Purchase Expenses",
+    }
+
+    # Advanced tab (formcontrolname -> on/off)
+    advanced_toggles = {
+        "AllowDiscount": True,
+        "EditSalePrice": False,
+    }
+
+    # UOM Conversions tab
+    enable_uom_conversions = True
+    primary_uom = "Bale"
+    uom_value_type = "Integer only"
+
 #itme itme imports
-    run_import_app = True
+    run_import_app = False
 
     EXCEL_FILE: str = os.environ.get(
         "IMPORT_EXCEL_FILE",
@@ -84,27 +104,6 @@ class Config:
     Item_ReorderLimit = ""        # Optional
 
 
-# Accounting
-accounting_mode = "Basic Accounting Mode"
-costing_method = "Weighted Average"
-
-accounting_accounts = {
-    "SaleAccountId": "Sales Revenue",
-    "PurchaseAccountId": "Purchase Expenses",
-}
-
-# Advanced tab
-advanced_toggles = {
-    "AllowDiscount": True,
-    "EditSalePrice": False,
-}
-
-# UOM Conversions tab
-enable_uom_conversions = True
-primary_uom = "Bale"
-uom_value_type = "Integer only"
-    
-
 # ======================================================
 # MAIN EXECUTION
 # ======================================================
@@ -123,7 +122,7 @@ if __name__ == "__main__":
         if Config.run_location_setup:
              settings(page)
         else:
-            print("x create_group")
+            print("x location_setup")
         if Config.run_create_group:
              create_group(page,  Config)
         else:
