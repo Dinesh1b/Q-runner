@@ -476,9 +476,4 @@ def create_group(page: Page, Config) -> None:
         value_type = getattr(Config, "uom_value_type", None)
         if value_type:
             select_prime_dropdown(page, "valueType", value_type, component="app-uom-conversions")
-        for _ in range(max(0, int(getattr(Config, "secondary_uom_count", 0)))):
-            add_secondary_uom(page)
-        for _ in range(max(0, int(getattr(Config, "tertiary_uom_count", 0)))):
-            add_tertiary_uom(page)
-
     save_item_group(page)
