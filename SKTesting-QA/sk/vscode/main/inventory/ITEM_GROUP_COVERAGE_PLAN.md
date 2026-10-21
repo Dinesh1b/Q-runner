@@ -17,6 +17,11 @@ create_group(page, Config)
 ```
 
 Useful optional `Config` attributes:
+- `accounting_mode = "Basic Accounting Mode"` or `"Inventory Accounting Mode"`
+- `costing_method = "Weighted Average"` (FIFO/LIFO are disabled in the supplied DOM)
+- `accounting_accounts = {"SaleAccountId": "Sales Revenue", "PurchaseAccountId": "Purchase Expenses"}`; provide only fields applicable to the chosen mode and existing account labels
+- `advanced_toggles = {"AllowDiscount": True, "EditSalePrice": False}`; keys must match the actual formcontrolname values in the supplied DOM
+- `label_fields = {"<confirmed-formcontrolname>": "<value>"}`; use only after inspecting Label Configuration with `inspect_label_configuration_controls(page)`
 - `enable_uom_conversions = True`
 - `primary_uom = "Bale"` (must exist in the active company)
 - `uom_value_type = "Integer only"` (must match an available option)
