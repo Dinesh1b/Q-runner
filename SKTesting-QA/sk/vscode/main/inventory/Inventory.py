@@ -40,7 +40,7 @@ class Config:
 
     
 
-    group_name = "Unit1"
+    group_name = "Unit14"
 
     inventory_type = "Unit" # Unit, Batch , Serialized
     sheet_name = "Data"
@@ -84,7 +84,25 @@ class Config:
     Item_ReorderLimit = ""        # Optional
 
 
+# Accounting
+accounting_mode = "Basic Accounting Mode"
+costing_method = "Weighted Average"
 
+accounting_accounts = {
+    "SaleAccountId": "Sales Revenue",
+    "PurchaseAccountId": "Purchase Expenses",
+}
+
+# Advanced tab
+advanced_toggles = {
+    "AllowDiscount": True,
+    "EditSalePrice": False,
+}
+
+# UOM Conversions tab
+enable_uom_conversions = True
+primary_uom = "Bale"
+uom_value_type = "Integer only"
     
 
 # ======================================================
