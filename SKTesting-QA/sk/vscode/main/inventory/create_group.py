@@ -11,7 +11,8 @@ import logging
 import re
 from typing import Iterable, Optional
 
-from playwright.sync_api import Page, Locator, expect, TimeoutError as PWTimeout
+from playwright.sync_api import Page, Locator, expect
+from login.popup_handler import detect_feedback
 
 log = logging.getLogger(__name__)
 
@@ -176,14 +177,15 @@ def set_accounting_mode(page: Page, mode_name: str) -> None:
 def set_uom_conversions_enabled(page: Page, enabled: bool) -> None:
     """Set the PrimeNG Enable UOM Conversions switch."""
     open_item_group_tab(page, "UOM Conversions")
-    switch = page.locator(
-        "app-uom-conversions p-inputswitch[formcontrolname='enabled'] "
-        "input[type='checkbox'][role='switch']"
+    switch_component = page.locator(
+        "app-uom-conversions p-inputswitch[formcontrolname='enabled']"
     )
-    expect(switch).to_be_visible()
-    if switch.is_checked() != enabled:
-        switch.click()
-    expect(switch).to_be_checked() if enabled else expect(switch).not_to_be_checked()
+    hidden_input = switch_component.locator("input[type='checkbox'][role='switch']")
+    expect(switch_component).to_be_visible()
+    # PrimeNG hides its native checkbox for accessibility; click the visible slider.
+    if hidden_input.is_checked() != enabled:
+        switch_component.locator(".p-inputswitch-slider").click()
+    expect(hidden_input).to_be_checked() if enabled else expect(hidden_input).not_to_be_checked()
 
     if enabled:
         expect(page.get_by_text("UOM conversions are disabled. Only the Primary UOM will be used.", exact=True)).to_have_count(0)
