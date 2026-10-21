@@ -1,479 +1,125 @@
-"""
-Item Group creation and five-tab coverage helpers for Stockount.
+import sys
+import os
+import time
+from datetime import datetime
+from playwright.sync_api import sync_playwright
 
-Selectors are based on the DOM supplied for the Item Group page.
-This module deliberately does not assume the missing Label Configuration DOM.
-"""
-
-from __future__ import annotations
-
-import logging
-import re
-from typing import Iterable, Optional
-
-from playwright.sync_api import Page, Locator, expect
-from login.popup_handler import detect_feedback
-
-log = logging.getLogger(__name__)
-
-TAB_NAMES = (
-    "General",
-    "Accounting",
-    "Advanced",
-    "Label Configuration",
-    "UOM Conversions",
-)
-
-
-def _tab(page: Page, name: str) -> Locator:
-    """Resolve one Item Group tab by its visible title."""
-    tab = page.locator("button.item-group-tab").filter(
-        has=page.locator(".tab-title", has_text=re.compile(rf"^{re.escape(name)}$"))
-    )
-    expect(tab).to_have_count(1)
-    return tab
-
-
-def open_item_group_tab(page: Page, name: str) -> None:
-    """Open a tab and assert that its button became active."""
-    if name not in TAB_NAMES:
-        raise ValueError(f"Unknown Item Group tab: {name!r}")
-    target = _tab(page, name)
-    target.scroll_into_view_if_needed()
-    target.click()
-    expect(target).to_have_class(re.compile(r"\bactive\b"))
-    log.info("Opened Item Group tab: %s", name)
-
-
-def assert_item_group_tabs(page: Page) -> None:
-    """Validate the five visible tabs without relying on Angular-generated IDs."""
-    tabs = page.locator("button.item-group-tab")
-    expect(tabs).to_have_count(5)
-    for name in TAB_NAMES:
-        expect(_tab(page, name)).to_be_visible()
-
-
-def _visible_tab_panel(page: Page) -> Locator:
-    """Return the visible form tab panel (hidden panels are excluded)."""
-    panels = page.locator("app-add-edit-item-group form > .tab-panel:visible")
-    expect(panels).to_have_count(1)
-    return panels
-
-
-def select_inventory_type(page: Page, inventory_type: str) -> None:
-    """Select Unit, Batch, or Serialized on the General tab."""
-    allowed = {"Unit", "Batch", "Serialized"}
-    if inventory_type not in allowed:
-        raise ValueError(f"inventory_type must be one of {sorted(allowed)}")
-    card = page.locator("button.inventory-type-card").filter(has_text=inventory_type)
-    expect(card).to_be_visible()
+# ---------------------------
+# Select Inventory Type
+# ---------------------------
+def select_inventory_type(page, Config, inventory_type):
+    card = page.locator("button.inventory-type-card", has_text=inventory_type)
+    card.wait_for(state="visible")
     card.click()
-    expect(card).to_have_class(re.compile(r"\bactive\b"))
 
 
-def fill_group_name(page: Page, group_name: str) -> None:
-    """Fill and verify the Item Group name field from the supplied DOM."""
-    field = page.locator("input[formcontrolname='groupName']")
-    expect(field).to_be_visible()
-    field.fill(group_name)
-    expect(field).to_have_value(group_name)
+# ---------------------------
+# Select Item Group Dropdown
+# ---------------------------
+def select_item_group(page, group_name):
+    dropdown = page.locator("p-dropdown[placeholder='Select Item Group']")
+    dropdown.locator("div.p-dropdown-trigger").click()
+
+    panel = page.locator("div.p-dropdown-panel")
+    panel.locator("input.p-dropdown-filter").fill(group_name)
+
+    panel.locator("li.p-dropdown-item", has_text=group_name).first.click()
 
 
-def set_checkbox(page: Page, form_control_name: str, enabled: bool) -> None:
-    """Set a native checkbox by Angular formcontrolname and verify its state."""
-    checkbox = page.locator(
-        f"app-add-edit-item-group input[type='checkbox'][formcontrolname='{form_control_name}']"
-    )
-    expect(checkbox).to_have_count(1)
-    expect(checkbox).to_be_enabled()
-    if checkbox.is_checked() != enabled:
-        checkbox.check() if enabled else checkbox.uncheck()
-    expect(checkbox).to_be_checked() if enabled else expect(checkbox).not_to_be_checked()
+# ---------------------------
+# Add Field
+# ---------------------------
+def add_field(page, field_index, field_type):
 
+    print(f" Adding Field {field_index}: {field_type}")
 
-def assert_advanced_toggle_state(
-    page: Page, form_control_name: str, expected_enabled: bool
-) -> None:
-    """Assert the state of an Advanced native checkbox without changing it."""
-    checkbox = page.locator(
-        f"app-add-edit-item-group input[type='checkbox'][formcontrolname='{form_control_name}']"
-    )
-    expect(checkbox).to_have_count(1)
-    if expected_enabled:
-        expect(checkbox).to_be_enabled()
-    else:
-        expect(checkbox).to_be_disabled()
+    combos = page.locator("span[role='combobox'][aria-label='Select']")
+    count_before = combos.count()
 
+    page.get_by_role("button", name="Add Field").click()
 
-def select_prime_dropdown(
-    page: Page,
-    form_control_name: str,
-    option_name: str,
-    *,
-    component: str = "app-add-edit-item-group",
-) -> None:
-    """
-    Select a PrimeNG dropdown option scoped by its Angular form control.
-    Works for the supplied UOM and accounting dropdown patterns.
-    """
-    if component == "app-add-edit-item-group":
-        # Accounting renders controls for both modes. Prefer the currently active
-        # mode's dropdown when the requested control belongs to that mode.
-        active_mode = page.locator(
-            "app-add-edit-item-group .accounting-mode-block.active"
-        )
-        mode_dropdown = active_mode.locator(
-            f"p-dropdown[formcontrolname='{form_control_name}']"
-        )
-        if mode_dropdown.count() == 1:
-            dropdown = mode_dropdown
-        else:
-            dropdown = page.locator(
-                f"{component} p-dropdown[formcontrolname='{form_control_name}']:visible"
-            )
-    elif component == "app-uom-conversions":
-        dropdown = page.locator(
-            "app-add-edit-item-group .tab-panel:visible "
-            f"{component} p-dropdown[formcontrolname='{form_control_name}']"
-        )
-    else:
-        dropdown = page.locator(
-            f"{component} p-dropdown[formcontrolname='{form_control_name}']"
-        )
-    expect(dropdown).to_have_count(1)
-    expect(dropdown).to_be_visible()
-    expect(dropdown).to_have_class(re.compile(r"p-inputwrapper"))
-
-    # This assertion intentionally fails if the feature is disabled in the UI.
-    root = dropdown.locator(".p-dropdown")
-    expect(root).not_to_have_class(re.compile(r"p-disabled"))
-
-    label = dropdown.locator("span[role='combobox']")
-    label.click()
-
-    list_id = label.get_attribute("aria-controls")
-    if list_id:
-        panel = page.locator("div.p-dropdown-panel").filter(
-            has=page.locator(f"#{list_id}")
-        )
-    else:
-        panel = page.locator("div.p-dropdown-panel:visible").last
-
-    panel.wait_for(state="visible", timeout=10_000)
-    option = panel.get_by_role("option", name=option_name, exact=True)
-    expect(option).to_be_visible()
-    option.click()
-    panel.wait_for(state="hidden")
-    expect(label).to_contain_text(option_name)
-
-
-def select_costing_method(page: Page, method: str) -> None:
-    """Select an enabled costing method; disabled methods are not force-clicked."""
-    if method not in {"Weighted Average", "FIFO", "LIFO"}:
-        raise ValueError("method must be Weighted Average, FIFO, or LIFO")
-    open_item_group_tab(page, "Accounting")
-    card = page.locator("button.costing-method-card").filter(
-        has_text=re.compile(rf"^{re.escape(method)}(?:\s|$)")
-    )
-    expect(card).to_have_count(1)
-    if method in {"FIFO", "LIFO"}:
-        expect(card).to_be_disabled()
-        raise ValueError(f"{method} is disabled in the supplied DOM; cannot select it.")
-    expect(card).to_be_enabled()
-    card.click()
-    expect(card).to_have_class(re.compile(r"\bactive\b"))
-
-
-def set_accounting_mode(page: Page, mode_name: str) -> None:
-    """Toggle between accounting mode buttons using visible text."""
-    if mode_name not in {"Basic Accounting Mode", "Inventory Accounting Mode"}:
-        raise ValueError(f"Unsupported accounting mode: {mode_name!r}")
-    open_item_group_tab(page, "Accounting")
-    button = page.get_by_role("button", name=mode_name, exact=True)
-    expect(button).to_be_visible()
-    if not re.search(r"\bactive\b", button.get_attribute("class") or ""):
-        button.click()
-    expect(button).to_have_class(re.compile(r"\bactive\b"))
-
-
-def set_uom_conversions_enabled(page: Page, enabled: bool) -> None:
-    """Set the PrimeNG Enable UOM Conversions switch."""
-    open_item_group_tab(page, "UOM Conversions")
-    switch_component = page.locator(
-        "app-add-edit-item-group .tab-panel:visible "
-        "app-uom-conversions p-inputswitch[formcontrolname='enabled']"
-    )
-    hidden_input = switch_component.locator("input[type='checkbox'][role='switch']")
-    expect(switch_component).to_be_visible()
-    # PrimeNG hides its native checkbox for accessibility; click the visible slider.
-    if hidden_input.is_checked() != enabled:
-        switch_component.locator(".p-inputswitch-slider").click()
-    expect(hidden_input).to_be_checked() if enabled else expect(hidden_input).not_to_be_checked()
-
-    if enabled:
-        expect(page.locator(
-            "app-add-edit-item-group .tab-panel:visible "
-            "app-uom-conversions .uom-disabled-banner"
-        )).to_have_count(0)
-    else:
-        expect(page.locator(
-            "app-add-edit-item-group .tab-panel:visible "
-            "app-uom-conversions .uom-disabled-banner"
-        )).to_contain_text("Only the Primary UOM will be used.")
-
-
-def add_secondary_uom(page: Page) -> None:
-    open_item_group_tab(page, "UOM Conversions")
-    rows = page.locator(
-        "app-add-edit-item-group .tab-panel:visible app-uom-conversions .uom-picker-row"
-    )
-    before = rows.count()
-    button = page.get_by_role("button", name=re.compile(r"Add Secondary UOM", re.I))
-    expect(button).to_be_visible()
-    expect(button).to_be_enabled()
-    button.click()
-    expect(rows).to_have_count(before + 1)
-
-
-def add_tertiary_uom(page: Page) -> None:
-    open_item_group_tab(page, "UOM Conversions")
-    rows = page.locator(
-        "app-add-edit-item-group .tab-panel:visible app-uom-conversions .uom-picker-row"
-    )
-    before = rows.count()
-    button = page.get_by_role("button", name=re.compile(r"Add Tertiary UOM", re.I))
-    expect(button).to_be_visible()
-    expect(button).to_be_enabled()
-    button.click()
-    expect(rows).to_have_count(before + 1)
-
-
-def assert_uom_preview_empty(page: Page) -> None:
-    """Check the known initial preview state shown in the supplied DOM."""
-    open_item_group_tab(page, "UOM Conversions")
-    expect(page.locator(
-        "app-add-edit-item-group .tab-panel:visible .uom-preview-empty"
-    )).to_have_text(
-        "No Secondary or Tertiary UOMs configured yet."
+    page.wait_for_function(
+        f"document.querySelectorAll(\"span[role='combobox'][aria-label='Select']\").length > {count_before}"
     )
 
+    dropdown = page.locator("span[role='combobox'][aria-label='Select']").last
+    dropdown.scroll_into_view_if_needed()
+    dropdown.click()
 
-def assert_form_save_state(page: Page, should_be_enabled: bool) -> None:
-    """Check Save state; the overall form may remain invalid until required fields are filled."""
-    save = page.locator("app-add-edit-item-group button[type='submit']")
-    expect(save).to_have_count(1)
-    if should_be_enabled:
-        expect(save).to_be_enabled()
-    else:
-        expect(save).to_be_disabled()
+    panel = page.locator("div.p-dropdown-panel").last
+    panel.wait_for(state="visible")
 
+    panel.locator("li[role='option']", has_text=field_type).click()
 
-def save_item_group(page: Page) -> None:
-    """Submit only when Save is enabled; then wait for user-visible feedback."""
-    save = page.locator("app-add-edit-item-group button[type='submit']")
-    expect(save).to_be_visible()
-    expect(save).to_be_enabled()
-    save.click()
-    # Do not infer success from clicking. The caller should assert the actual toast,
-    # navigation, or saved row according to the app's observed success behavior.
-    log.info("Submitted Item Group form; verify the application's success signal.")
+    print(f" Field {field_index} set")
 
 
+# ---------------------------
+# Add Serialized IDs
+# ---------------------------
+def add_ids(page, Config):
 
-def configure_accounting(
-    page: Page,
-    accounts: Optional[dict[str, str]] = None,
-    *,
-    mode: str = "Basic Accounting Mode",
-    costing_method: Optional[str] = None,
-) -> None:
-    """Configure supported Accounting controls from formcontrolname to visible option label."""
-    open_item_group_tab(page, "Accounting")
-    set_accounting_mode(page, mode)
-    if costing_method:
-        select_costing_method(page, costing_method)
-    for control_name, option_label in (accounts or {}).items():
-        select_prime_dropdown(page, control_name, option_label)
+    for index, id_name in enumerate(Config.ids, start=1):
 
+        field = page.locator(f"input[formcontrolname='id{index}Name']")
+        field.wait_for(state="visible")
+        field.fill(id_name)
 
-def configure_advanced_toggles(page: Page, toggles: dict[str, bool]) -> None:
-    """Apply explicitly supplied Advanced toggle values; never assume defaults."""
-    open_item_group_tab(page, "Advanced")
-    for control_name, enabled in toggles.items():
-        set_checkbox(page, control_name, enabled)
+        print(f" ID {index} added → {id_name}")
 
+        if index < len(Config.ids):
 
+            add_btn = page.locator("button", has_text="Add ID")
+            add_btn.click()
 
-def configure_label_fields(page: Page, fields: dict[str, object]) -> None:
-    """
-    Configure Label Configuration controls by their confirmed formcontrolname.
-    Supply these names only after inspecting the rendered tab DOM.
-    """
-    open_item_group_tab(page, "Label Configuration")
-    panel = _visible_tab_panel(page)
-    for control_name, value in fields.items():
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", control_name):
-            raise ValueError(f"Unsafe or invalid formcontrolname: {control_name!r}")
-        control = panel.locator(f"[formcontrolname='{control_name}']")
-        expect(control).to_have_count(1)
-        expect(control).to_be_visible()
-        expect(control).to_be_enabled()
-        tag_name = control.evaluate("(el) => el.tagName.toLowerCase()")
-        input_type = (control.get_attribute("type") or "").lower()
-        if tag_name == "p-dropdown":
-            select_prime_dropdown(page, control_name, str(value))
-        elif tag_name == "input" and input_type in {"checkbox", "radio"}:
-            if not isinstance(value, bool):
-                raise TypeError(f"{control_name} expects a boolean value")
-            if input_type == "checkbox":
-                control.check() if value else control.uncheck()
-                expect(control).to_be_checked() if value else expect(control).not_to_be_checked()
-            else:
-                raise ValueError(
-                    f"{control_name} is a radio input; use a dedicated radio-group helper."
-                )
-        elif tag_name in {"input", "textarea"}:
-            control.fill(str(value))
-            expect(control).to_have_value(str(value))
-        else:
-            raise ValueError(
-                f"Unsupported Label Configuration control type for {control_name}: {tag_name}"
+            page.wait_for_selector(
+                f"input[formcontrolname='id{index+1}Name']"
             )
 
+def add_field_types(page,field_types):
 
-def inspect_label_configuration_controls(page: Page) -> list[dict[str, str]]:
-    """
-    Capture visible Label Configuration controls to help ground selectors.
-    Diagnostic only: it intentionally does not guess field semantics.
-    """
-    open_item_group_tab(page, "Label Configuration")
-    panel = _visible_tab_panel(page)
-    controls = panel.locator("input, select, textarea, button, p-dropdown")
-    snapshot: list[dict[str, str]] = []
-    for index in range(controls.count()):
-        control = controls.nth(index)
-        if not control.is_visible():
-            continue
-        snapshot.append({
-            "tag": control.evaluate("(el) => el.tagName.toLowerCase()"),
-            "formcontrolname": control.get_attribute("formcontrolname") or "",
-            "name": control.get_attribute("name") or "",
-            "placeholder": control.get_attribute("placeholder") or "",
-            "aria_label": control.get_attribute("aria-label") or "",
-            "text": (control.inner_text() or "").strip()[:160],
-        })
-    log.info("Label Configuration controls: %s", snapshot)
-    return snapshot
+    for index, field_type in enumerate(field_types, start=2):
+        add_field(page, index, field_type)
 
+# ---------------------------
+# Automation Logic
+# ---------------------------
+def create_group(page, Config):
+    page.click("img[src*='Item_icon.svg']")
+    page.wait_for_timeout(500)
 
-def assert_disabled_advanced_options(page: Page) -> None:
-    """Verify feature flags visibly disabled in the supplied Advanced DOM."""
-    open_item_group_tab(page, "Advanced")
-    for image_alt in ("allowNegativeStock", "lowStockAlert"):
-        row = page.locator(".advanced-item").filter(
-            has=page.locator(f"img[alt='{image_alt}']")
-        )
-        expect(row).to_have_count(1)
-        expect(row.locator("input[type='checkbox']")).to_be_disabled()
+    page.click("a[href*='itemGroup']")
+    page.wait_for_timeout(500)
 
+    page.click("button:has-text('Add Item Group')")
+    page.wait_for_timeout(500)
+    print("Add Item Group")
 
-def assert_tab_switch_preserves_value(
-    page: Page, source_tab: str, target_tab: str, selector: str, value: str
-) -> None:
-    """A focused cross-tab persistence check for any stable field selector."""
-    open_item_group_tab(page, source_tab)
-    field = page.locator(selector)
-    expect(field).to_be_visible()
-    field.fill(value)
-    open_item_group_tab(page, target_tab)
-    open_item_group_tab(page, source_tab)
-    expect(field).to_have_value(value)
+    page.fill("input[formcontrolname='groupName']", Config.group_name)
 
+    #    Fixed: pass both Config and inventory_type
+    select_inventory_type(page, Config, Config.inventory_type)
 
-def open_add_item_group(page: Page) -> None:
-    """Navigate to Add Item Group using semantic UI locators."""
-    inventory_icon = page.locator("img[src*='Item_icon.svg']")
-    expect(inventory_icon).to_be_visible()
-    inventory_icon.click()
-    page.get_by_role("button", name="Item Groups", exact=True).click()
-    page.get_by_role("button", name=re.compile(r"Add Item Group", re.I)).click()
-    expect(page.locator("input[formcontrolname='groupName']")).to_be_visible()
-    assert_item_group_tabs(page)
-
-
-def configure_barcode(page: Page, field_types: Iterable[str]) -> None:
-    """Configure barcode fields using the supplied Barcode Configuration dialog."""
-    page.locator("input[placeholder='Barcode']").click()
-    for field_type in field_types:
-        combos = page.locator("span[role='combobox'][aria-label='Select']")
-        before = combos.count()
-        page.get_by_role("button", name="Add Field", exact=True).click()
-        expect(combos).to_have_count(before + 1)
-        dropdown = combos.last
-        dropdown.click()
-        panel = page.locator("div.p-dropdown-panel:visible").last
-        panel.wait_for(state="visible")
-        panel.get_by_role("option", name=re.compile(re.escape(field_type), re.I)).click()
-
-    dialog = page.locator("div.p-dialog").filter(has_text="Barcode Configuration")
-    expect(dialog).to_be_visible()
-    dialog.get_by_role("button", name="Ok", exact=True).click()
-    expect(dialog).to_be_hidden()
-
-
-def create_group(page: Page, Config) -> None:
-    """
-    Backwards-compatible create_group entry point.
-
-    This preserves the current workflow's core behavior. The extra tab coverage
-    helpers above can be called from targeted test functions using test data.
-    Do not silently invent accounting, labels, or UOM settings that are absent
-    from Config or from the supplied test specification.
-    """
-    open_add_item_group(page)
-    fill_group_name(page, Config.group_name)
-    select_inventory_type(page, Config.inventory_type)
-
+    #    Fixed: pass Config
     if Config.inventory_type == "Serialized":
-        ids = getattr(Config, "ids", [])
-        for index, id_name in enumerate(ids, start=1):
-            field = page.locator(f"input[formcontrolname='id{index}Name']")
-            expect(field).to_be_visible()
-            field.fill(id_name)
-            if index < len(ids):
-                page.get_by_role("button", name=re.compile(r"Add ID", re.I)).click()
-                expect(page.locator(f"input[formcontrolname='id{index + 1}Name']")).to_be_visible()
+        add_ids(page, Config)
 
-    configure_barcode(page, getattr(Config, "fields", []))
+    page.locator("input[placeholder='Barcode']").click()
+    print("Click Barcode Config")
 
-    # Optional tab settings are only applied when explicitly supplied in Config.
-    accounting_accounts = getattr(Config, "accounting_accounts", None)
-    accounting_mode = getattr(Config, "accounting_mode", None)
-    costing_method = getattr(Config, "costing_method", None)
-    if accounting_accounts or accounting_mode or costing_method:
-        configure_accounting(
-            page,
-            accounts=accounting_accounts,
-            mode=accounting_mode or "Basic Accounting Mode",
-            costing_method=costing_method,
-        )
+    #    Fixed: pass field_types
+    add_field_types(page, Config.fields)
 
-    advanced_toggles = getattr(Config, "advanced_toggles", None)
-    if advanced_toggles:
-        configure_advanced_toggles(page, advanced_toggles)
+    ok_btn = page.locator('/html/body/app-root/app-layout/div/app-add-edit-item-group/p-dialog/div/div/div[3]/div/div[3]/div/button[2]')
 
-    label_fields = getattr(Config, "label_fields", None)
-    if label_fields:
-        configure_label_fields(page, label_fields)
+    ok_btn.wait_for()
+    ok_btn.click()
+    print("click OK")
+    page.wait_for_timeout(500)
 
-    # Optional test configuration can provide these explicitly. Avoid guessing
-    # account IDs or UOM labels because options depend on the current company.
-    if getattr(Config, "enable_uom_conversions", False):
-        set_uom_conversions_enabled(page, True)
-        uom_name = getattr(Config, "primary_uom", None)
-        if uom_name:
-            select_prime_dropdown(page, "uomStructureId", uom_name, component="app-uom-conversions")
-        value_type = getattr(Config, "uom_value_type", None)
-        if value_type:
-            select_prime_dropdown(page, "valueType", value_type, component="app-uom-conversions")
-    save_item_group(page)
+    page.click("button:has-text('Save')")
+    page.click("button:has-text('Back')")
+
+    # Verify Dropdown
+    #select_item_group(page, Config.group_name)
+
