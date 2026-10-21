@@ -237,7 +237,9 @@ def add_secondary_uom(page: Page) -> None:
 
 def add_tertiary_uom(page: Page) -> None:
     open_item_group_tab(page, "UOM Conversions")
-    rows = page.locator("app-uom-conversions .uom-picker-row")
+    rows = page.locator(
+        "app-add-edit-item-group .tab-panel:visible app-uom-conversions .uom-picker-row"
+    )
     before = rows.count()
     button = page.get_by_role("button", name=re.compile(r"Add Tertiary UOM", re.I))
     expect(button).to_be_visible()
@@ -299,6 +301,44 @@ def configure_advanced_toggles(page: Page, toggles: dict[str, bool]) -> None:
     open_item_group_tab(page, "Advanced")
     for control_name, enabled in toggles.items():
         set_checkbox(page, control_name, enabled)
+
+
+
+def configure_label_fields(page: Page, fields: dict[str, object]) -> None:
+    """
+    Configure Label Configuration controls by their confirmed formcontrolname.
+    Supply these names only after inspecting the rendered tab DOM.
+    """
+    open_item_group_tab(page, "Label Configuration")
+    panel = _visible_tab_panel(page)
+    for control_name, value in fields.items():
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", control_name):
+            raise ValueError(f"Unsafe or invalid formcontrolname: {control_name!r}")
+        control = panel.locator(f"[formcontrolname='{control_name}']")
+        expect(control).to_have_count(1)
+        expect(control).to_be_visible()
+        expect(control).to_be_enabled()
+        tag_name = control.evaluate("(el) => el.tagName.toLowerCase()")
+        input_type = (control.get_attribute("type") or "").lower()
+        if tag_name == "p-dropdown":
+            select_prime_dropdown(page, control_name, str(value))
+        elif tag_name == "input" and input_type in {"checkbox", "radio"}:
+            if not isinstance(value, bool):
+                raise TypeError(f"{control_name} expects a boolean value")
+            if input_type == "checkbox":
+                control.check() if value else control.uncheck()
+                expect(control).to_be_checked() if value else expect(control).not_to_be_checked()
+            else:
+                raise ValueError(
+                    f"{control_name} is a radio input; use a dedicated radio-group helper."
+                )
+        elif tag_name in {"input", "textarea"}:
+            control.fill(str(value))
+            expect(control).to_have_value(str(value))
+        else:
+            raise ValueError(
+                f"Unsupported Label Configuration control type for {control_name}: {tag_name}"
+            )
 
 
 def inspect_label_configuration_controls(page: Page) -> list[dict[str, str]]:
@@ -406,6 +446,26 @@ def create_group(page: Page, Config) -> None:
 
     configure_barcode(page, getattr(Config, "fields", []))
 
+    # Optional tab settings are only applied when explicitly supplied in Config.
+    accounting_accounts = getattr(Config, "accounting_accounts", None)
+    accounting_mode = getattr(Config, "accounting_mode", None)
+    costing_method = getattr(Config, "costing_method", None)
+    if accounting_accounts or accounting_mode or costing_method:
+        configure_accounting(
+            page,
+            accounts=accounting_accounts,
+            mode=accounting_mode or "Basic Accounting Mode",
+            costing_method=costing_method,
+        )
+
+    advanced_toggles = getattr(Config, "advanced_toggles", None)
+    if advanced_toggles:
+        configure_advanced_toggles(page, advanced_toggles)
+
+    label_fields = getattr(Config, "label_fields", None)
+    if label_fields:
+        configure_label_fields(page, label_fields)
+
     # Optional test configuration can provide these explicitly. Avoid guessing
     # account IDs or UOM labels because options depend on the current company.
     if getattr(Config, "enable_uom_conversions", False):
@@ -416,5 +476,9 @@ def create_group(page: Page, Config) -> None:
         value_type = getattr(Config, "uom_value_type", None)
         if value_type:
             select_prime_dropdown(page, "valueType", value_type, component="app-uom-conversions")
+        for _ in range(max(0, int(getattr(Config, "secondary_uom_count", 0)))):
+            add_secondary_uom(page)
+        for _ in range(max(0, int(getattr(Config, "tertiary_uom_count", 0)))):
+            add_tertiary_uom(page)
 
     save_item_group(page)
