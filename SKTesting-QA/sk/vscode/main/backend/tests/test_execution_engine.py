@@ -108,3 +108,32 @@ def test_run_order_and_skipping(no_thread):
 def test_legacy_location_setup_key_is_honoured(no_thread):
     total, active = _run({"run_inventory": True, "run_locatio_setup": "true"})
     assert [flag for flag, _ in active] == ["run_location_setup"]
+
+
+def test_create_group_runs_with_only_update_selected(no_thread):
+    # Run Update is a sub-option (alt_flag) of the Create Group module (idx 13)
+    total, active = _run({"run_inventory": True, "run_create_group": False, "run_update_group": True,
+                          "MODULE_RUN_ORDER": [13]})
+    assert [flag for flag, _ in active] == ["run_create_group"]
+    assert total == 1
+
+
+def test_create_and_update_count_as_one_module(no_thread):
+    total, active = _run({"run_inventory": True, "run_create_group": True, "run_update_group": True})
+    assert [flag for flag, _ in active] == ["run_create_group"]
+    assert total == 1
+
+
+def test_group_off_clears_update_group():
+    cfg = {"run_inventory": False, "run_create_group": True, "run_update_group": True}
+    _disable_modules_in_off_groups(cfg, IDX6_FLAGS)
+    assert cfg["run_create_group"] is False
+    assert cfg["run_update_group"] is False
+
+
+def test_create_group_name_means_create_not_update(no_thread):
+    cfg = {"run_inventory": True, "modules": ["Create_Group"]}
+    total, active = _run(cfg)
+    assert cfg["run_create_group"] is True
+    assert not cfg.get("run_update_group")
+    assert [flag for flag, _ in active] == ["run_create_group"]

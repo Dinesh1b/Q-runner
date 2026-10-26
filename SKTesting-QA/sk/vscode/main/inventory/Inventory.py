@@ -11,9 +11,11 @@ if ROOT_DIR not in sys.path:
 from login.login import login
 from login.popup_handler import detect_feedback
 from excel_logger import write_log, set_excel_path
-from inventory.create_group import create_group as create_group
+from inventory.create_group import create_group, update_group
 from inventory.Item_import_add import import_app
 from inventory.location import settings
+# Item Group values (name, type, barcode fields, IDs, Accounting, Advanced, UOM) live in backend/Config.py → Inventory Setup
+from backend.Config import Config as GroupConfig
 class Config:
 
         # ── Conditional Login Control ─────────────────────────────
@@ -30,7 +32,8 @@ class Config:
     environments = "production" # production, staging, development
 
     Branch = "gr"
-    run_create_group = True
+    run_create_group = False
+    run_update_group = True     # update the saved group named group_name so it matches backend/Config.py
     run_location_setup = False
     zones  = ["SA"]
     aisles = ["A1", "A2", "A3"]
@@ -40,42 +43,7 @@ class Config:
 
     
 
-    group_name = "Unit14"
-
-    inventory_type = "Unit" # Unit, Batch , Serialized
     sheet_name = "Data"
-    # input add Fields   
-    fields = [
-        "Item Code",
-        "Item Name",
-    ]
-
-    # input add IDs (used only if Serialized)
-    ids = [
-        "Serial Number",
-        "IMEI",
-        "Barcode"
-    ]
-
-    # Accounting tab (accounts: formcontrolname -> account name)
-    accounting_mode = "Basic Accounting Mode"
-    costing_method = "Weighted Average"
-
-    accounting_accounts = {
-        "SaleAccountId": "Sales Revenue",
-        "PurchaseAccountId": "Purchase Expenses",
-    }
-
-    # Advanced tab (formcontrolname -> on/off)
-    advanced_toggles = {
-        "AllowDiscount": True,
-        "EditSalePrice": False,
-    }
-
-    # UOM Conversions tab
-    enable_uom_conversions = True
-    primary_uom = "Bale"
-    uom_value_type = "Integer only"
 
 #itme itme imports
     run_import_app = False
@@ -120,15 +88,20 @@ if __name__ == "__main__":
             password=Config.password
         )
         if Config.run_location_setup:
-             settings(page)
+             settings(page, Config)
         else:
             print("x location_setup")
         if Config.run_create_group:
-             create_group(page,  Config)
+             create_group(page,  GroupConfig)
         else:
             print("x create_group")
+        if Config.run_update_group:
+             update_group(page, GroupConfig)
+        else:
+            print("x update_group")
         if Config.run_import_app:
-             import_app(page,  Config)
+             # Import into the same item group (backend/Config.py group_name)
+             import_app(page, type("ImportConfig", (Config,), {"group_name": GroupConfig.group_name}))
         else:
             print("x Itme_imports")
         browser.close()

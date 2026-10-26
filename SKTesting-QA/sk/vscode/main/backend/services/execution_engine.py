@@ -32,10 +32,21 @@ def _write_runtime_config(cfg: dict, rid: str, suffix: str, build_config_py):
     return runtime_path
 
 
+def _alt_flag_maps():
+    """
+    {main flag: alt_flag} and {alt_flag: main flag} for modules whose alt_flag is a sub-option
+    (Create Group: run_create_group / run_update_group). idx 6 keeps its own special handling.
+    """
+    flag_to_alt = {m["flag"]: m["alt_flag"] for m in get_all_modules() if m.get("alt_flag") and m["idx"] != 6}
+    return flag_to_alt, {alt: flag for flag, alt in flag_to_alt.items()}
+
+
 def _default_active_modules(cfg, MODULE_KEYS, idx6_flags, flag_to_name):
     """Build active_modules when no explicit MODULE_RUN_ORDER is given."""
+    flag_to_alt, alt_to_flag = _alt_flag_maps()
     active_modules = []
     idx6_seen = False
+    seen = set()
     for k, n in MODULE_KEYS:
         if k in idx6_flags:
             if idx6_seen:
@@ -44,8 +55,13 @@ def _default_active_modules(cfg, MODULE_KEYS, idx6_flags, flag_to_name):
                 idx6_seen = True
                 active_modules.append(("__idx6__", flag_to_name.get("run_create_audit", "Audit_Plan")))
             continue
-        if cfg.get(k):
-            active_modules.append((k, n))
+        # A module with sub-options runs if either flag is set, and is listed once under its main flag
+        flag = alt_to_flag.get(k, k)
+        if flag in seen:
+            continue
+        if cfg.get(flag) or cfg.get(flag_to_alt.get(flag)):
+            seen.add(flag)
+            active_modules.append((flag, n))
     return active_modules
 
 
@@ -116,6 +132,9 @@ def execute_run(cfg, rid, logger, state_lock, get_active_proc, set_active_proc, 
     flag_to_idx = get_flag_to_idx_map()
     name_to_flag = {name: key for key, name in MODULE_KEYS}
     flag_to_name = {key: name for key, name in MODULE_KEYS}
+    flag_to_alt, alt_to_flag = _alt_flag_maps()
+    # For a module with sub-options, its name means its main flag (run_create_group), not the alt_flag
+    name_to_flag.update({flag_to_name[flag]: flag for flag in flag_to_alt})
 
     # Special case: idx 6 covers Audit_Plan (timezone/create/update) OR Ad_hoc
     idx6_flags = ("run_create_audit", "run_create_Ad_hoc_Audit", "run_timezone", "run_update_audit")
@@ -160,12 +179,14 @@ def execute_run(cfg, rid, logger, state_lock, get_active_proc, set_active_proc, 
                     flag = idx_to_flag.get(item)
             elif isinstance(item, str):
                 flag = item if item.startswith("run_") else name_to_flag.get(item)
+                flag = alt_to_flag.get(flag, flag)
 
             if not flag or flag in seen:
                 continue
             seen.add(flag)
 
-            if cfg.get(flag):
+            # A module with sub-options runs if either of its flags is set
+            if cfg.get(flag) or cfg.get(flag_to_alt.get(flag)):
                 active_modules.append((flag, flag_to_name.get(flag, flag)))
 
         if not active_modules:
@@ -271,6 +292,12 @@ def execute_run(cfg, rid, logger, state_lock, get_active_proc, set_active_proc, 
                         for f in idx6_flags:
                             module_cfg[f] = bool(cfg.get(f))
                         target_idx = 6
+                    elif flag in flag_to_alt:
+                        # Sub-options (Create Group: create / update) stay as configured
+                        # instead of forcing the main flag on.
+                        module_cfg[flag] = bool(cfg.get(flag))
+                        module_cfg[flag_to_alt[flag]] = bool(cfg.get(flag_to_alt[flag]))
+                        target_idx = flag_to_idx.get(flag)
                     else:
                         module_cfg[flag] = True
                         target_idx = flag_to_idx.get(flag)

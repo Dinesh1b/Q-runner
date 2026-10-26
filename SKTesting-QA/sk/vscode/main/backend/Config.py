@@ -65,6 +65,7 @@ class Config:
 
     # Inventory
     run_create_group  = False
+    run_update_group  = False
     run_location_setup = False
     run_import_app    = False
 
@@ -214,6 +215,38 @@ class Config:
     inventory_type = "Serialized"
     fields         = ['Item Code', 'Item Name']
     ids            = ['Serial Number', 'IMEI', 'Barcode']
+
+    # Accounting tab (accounts: formcontrolname -> account name)
+    accounting_mode     = "Basic Accounting Mode"
+    costing_method      = "Weighted Average"
+    accounting_accounts = {"SaleAccountId": "Sales Revenue", "PurchaseAccountId": "Purchase Expenses"}
+
+    # Advanced tab (formcontrolname -> on/off)
+    advanced_toggles    = {"AllowDiscount": True, "EditSalePrice": True}
+
+    # UOM Conversions tab: True = on, False = off
+    # Extra rows read 1 <uom> = <quantity> <base>   (base defaults to the Primary UOM)
+    # UOMs: Bale, Bottle, Box, Case, Container, Crate, Meter, Pallet, Piece, Roll, Unit
+    enable_uom_conversions = True
+    primary_uom    = "Bale"
+    uom_value_type = "Integer only"
+    secondary_uoms = [{"uom": "Box", "quantity": 12}]                     # 1 Box = 12 Bale
+    tertiary_uoms  = [{"uom": "Pallet", "quantity": 25, "base": "Box"}]   # 1 Pallet = 25 Box
+    default_uom    = None   # UOM name to mark as Default UOM; None keeps the Primary
+
+    # --- Location Setup ---
+    zones  = ["SA"]
+    aisles = ["A1", "A2", "A3"]
+    bays   = ["B1", "B2", "B3", "B4", "B5"]
+    levels = ["L1", "L2", "L3", "L4", "L5"]
+
+    # Location Setup run options: add the locations above and/or run the Warehouse tests (WH_001-WH_040)
+    ls_run_setup    = True
+    ls_run_tests    = False
+    ls_test_groups  = ["functional", "validation", "ui"]
+    ls_test_cases   = []     # TC IDs such as "WH_007"; empty runs every case in the groups above
+    ls_test_prefix  = "QA"   # test locations are named <prefix (3 chars max)><HHMM>…; only those are changed or deleted
+    ls_test_cleanup = True   # delete the test locations at the end
 
     # ---------------------------
     # Import Items

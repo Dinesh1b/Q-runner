@@ -3,6 +3,8 @@
  * Strongly typed interface for runner configuration matching backend config_builder.py
  */
 
+import { UomRow } from './item-group.model';
+
 export interface RunConfig {
   /* Timeouts & Engine */
   DEFAULT_TIMEOUT: number;
@@ -151,12 +153,28 @@ export interface RunConfig {
   inventory_type: string;
   inv_fields: string[];
   inv_ids: string[];
+  inv_accounting_mode?: string | null;
+  inv_costing_method?: string | null;
+  inv_accounting_accounts?: Record<string, string>;
+  inv_advanced_toggles?: Record<string, boolean>;
+  inv_enable_uom_conversions?: boolean | null;
+  inv_primary_uom?: string | null;
+  inv_uom_value_type?: string | null;
+  inv_secondary_uoms?: UomRow[];
+  inv_tertiary_uoms?: UomRow[];
+  inv_default_uom?: string | null;
 
   /* Location Setup */
   ls_zones: string;
   ls_aisles: string;
   ls_bays: string;
   ls_levels: string;
+  ls_run_setup?: boolean;
+  ls_run_tests?: boolean;
+  ls_test_groups?: string[];
+  ls_test_cases?: string;
+  ls_test_prefix?: string;
+  ls_test_cleanup?: boolean;
 
   /* Import Items */
   EXCEL_FILE: string;

@@ -70,7 +70,7 @@ def _load_workflow(workflow_ref: str):
 
 
 FLAG_TO_IDX = get_flag_to_idx_map()
-DEFAULT_ORDER = list(range(16))
+DEFAULT_ORDER = [m["idx"] for m in get_all_modules()]
 
 
 def _enabled_order():
@@ -210,10 +210,6 @@ def main():
             if idx == 6:
                 return run_create_audit()
             wf_func = _load_workflow(mod_def["workflow"])
-            # Some workflows take (page, Config), some take just (page)
-            # Location setup (idx 14) only takes page
-            if idx == 14:
-                return wf_func(page)
             return wf_func(page, Config)
 
         try:

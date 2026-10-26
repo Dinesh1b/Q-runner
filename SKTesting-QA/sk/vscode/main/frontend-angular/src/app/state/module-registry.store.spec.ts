@@ -92,4 +92,27 @@ describe('ModuleRegistryStore — group / module enablement rules', () => {
     expect(cfg['run_inventory']).toBeFalse();
     expect(cfg['frequency']).toBe('one-time');
   });
+
+  it('create group runs create only by default', () => {
+    store.toggleGroup(2, true);
+    store.toggleModule(13);
+
+    const cfg = configStore.buildRunConfig() as unknown as Record<string, unknown>;
+    expect(cfg['run_create_group']).toBeTrue();
+    expect(cfg['run_update_group']).toBeFalse();
+  });
+
+  it('create group can run update only', () => {
+    store.toggleGroup(2, true);
+    store.toggleModule(13);
+    configStore.cbCg.set(false);
+    configStore.cbUg.set(true);
+    TestBed.flushEffects();  // the Run Queue follows the enabled modules through an effect
+
+    const cfg = configStore.buildRunConfig() as unknown as Record<string, unknown>;
+    expect(cfg['run_create_group']).toBeFalse();
+    expect(cfg['run_update_group']).toBeTrue();
+    expect(cfg['run_inventory']).toBeTrue();
+    expect(cfg['MODULE_RUN_ORDER'] as number[]).toContain(13);
+  });
 });

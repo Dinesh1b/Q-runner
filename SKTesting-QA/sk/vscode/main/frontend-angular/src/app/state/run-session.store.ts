@@ -150,6 +150,11 @@ export class RunSessionStore implements OnDestroy {
 
   private classifyLogLevel(text: string): LogLevel {
     const l = text.toLowerCase();
+    // App messages read from the page ("→ [Alert] …"): errors red, validation messages amber
+    if (l.includes('→ [')) {
+      if (/error|fail|exception|unable/.test(l)) return 'error';
+      if (/mandatory|required|duplicate|invalid|not found|already exists/.test(l)) return 'warn';
+    }
     if (l.includes('[success]') || l.includes('[pass]') || l.includes('[ok]')) return 'success';
     if (l.includes('[error]') || l.includes('[fail]') || l.includes('exception') || l.includes('traceback')) return 'error';
     if (l.includes('[warn]') || l.includes('warning')) return 'warn';

@@ -2,6 +2,9 @@
 config_builder.py  —  Generates Config.py from the UI payload (buildCfg in app.js).
 """
 
+import math
+import re
+
 
 def build_config_py(cfg: dict) -> str:
 
@@ -41,15 +44,30 @@ def build_config_py(cfg: dict) -> str:
         return cfg.get(key, default)
 
     def pylist(val, default):
-        """Convert a value (list or newline-separated string) to a Python list literal."""
+        """Convert a value (list, or a string separated by new lines or commas) to a Python list literal."""
         if val is None:
             return repr(default)
         if isinstance(val, list):
             items = [x for x in val if x]
             return repr(items) if items else repr(default)
-        # Newline-separated string from a textarea
-        items = [x.strip() for x in str(val).split("\n") if x.strip()]
+        # Text from a textarea (one per line) or an input (comma separated)
+        items = [x.strip() for x in re.split(r"[\n,]", str(val)) if x.strip()]
         return repr(items) if items else repr(default)
+
+    def lit(val):
+        """Python literal for a JSON value from the UI (text, numbers, true/false, lists, dicts); blank -> None."""
+        def clean(v):
+            if v is None or isinstance(v, (bool, str)):
+                return v
+            if isinstance(v, (int, float)):
+                return v if math.isfinite(v) else None
+            if isinstance(v, list):
+                return [clean(x) for x in v]
+            if isinstance(v, dict):
+                return {str(k): clean(x) for k, x in v.items()}
+            return str(v)
+        val = clean(val)
+        return "None" if val in (None, "", [], {}) else repr(val)
 
     def normalize_audit_mapping_type(val):
         val = "" if val is None else str(val).strip()
@@ -103,6 +121,7 @@ def build_config_py(cfg: dict) -> str:
     )
     _run_inventory = any([
         bool(g("run_create_group", False)),
+        bool(g("run_update_group", False)),
         bool(g("run_location_setup", False)),   # keep the legacy typo key consistent
         bool(g("run_import_app", False)),
     ])
@@ -176,6 +195,7 @@ class Config:
 
     # Inventory
     run_create_group  = {run_create_group}
+    run_update_group  = {run_update_group}
     run_location_setup = {run_location_setup}
     run_import_app    = {run_import_app}
 
@@ -326,6 +346,30 @@ class Config:
     inventory_type = {inventory_type}
     fields         = {fields}
     ids            = {ids}
+    accounting_mode        = {accounting_mode}
+    costing_method         = {costing_method}
+    accounting_accounts    = {accounting_accounts}
+    advanced_toggles       = {advanced_toggles}
+    enable_uom_conversions = {enable_uom_conversions}
+    primary_uom            = {primary_uom}
+    uom_value_type         = {uom_value_type}
+    secondary_uoms         = {secondary_uoms}
+    tertiary_uoms          = {tertiary_uoms}
+    default_uom            = {default_uom}
+
+    # --- Location Setup ---
+    zones  = {zones}
+    aisles = {aisles}
+    bays   = {bays}
+    levels = {levels}
+
+    # Location Setup run options: add the locations above and/or run the Warehouse tests (WH_001-WH_040)
+    ls_run_setup    = {ls_run_setup}
+    ls_run_tests    = {ls_run_tests}
+    ls_test_groups  = {ls_test_groups}
+    ls_test_cases   = {ls_test_cases}
+    ls_test_prefix  = {ls_test_prefix}
+    ls_test_cleanup = {ls_test_cleanup}
 
     # ---------------------------
     # Import Items
@@ -395,6 +439,7 @@ class Config:
         MODULE_RUN_ORDER     = repr(g("MODULE_RUN_ORDER", [])),
         # Inventory
         run_create_group  = b(g("run_create_group",  False)),
+        run_update_group  = b(g("run_update_group",  False)),
         run_location_setup = b(g("run_location_setup", False)),
         EXCEL_PATH                   = p(g("EXCEL_PATH")),
         AUDITOR_MAPPING_TYPE         = s(g("AUDITOR_MAPPING_TYPE",        "Random")),
@@ -473,6 +518,26 @@ class Config:
         inventory_type = s(g("inventory_type",  "Serialized")),
         fields         = pylist(g("inv_fields"),  ["Item Code", "Item Name"]),
         ids            = pylist(g("inv_ids"),     ["Id1Name", "Id2Name", "Id3Name"]),
+        accounting_mode        = lit(g("inv_accounting_mode")),
+        costing_method         = lit(g("inv_costing_method")),
+        accounting_accounts    = lit(g("inv_accounting_accounts")),
+        advanced_toggles       = lit(g("inv_advanced_toggles")),
+        enable_uom_conversions = lit(g("inv_enable_uom_conversions")),
+        primary_uom            = lit(g("inv_primary_uom")),
+        uom_value_type         = lit(g("inv_uom_value_type")),
+        secondary_uoms         = lit(g("inv_secondary_uoms")),
+        tertiary_uoms          = lit(g("inv_tertiary_uoms")),
+        default_uom            = lit(g("inv_default_uom")),
+        zones          = pylist(g("ls_zones"),  ["SA"]),
+        aisles         = pylist(g("ls_aisles"), ["A1", "A2", "A3"]),
+        bays           = pylist(g("ls_bays"),   ["B1", "B2", "B3", "B4", "B5"]),
+        levels         = pylist(g("ls_levels"), ["L1", "L2", "L3", "L4", "L5"]),
+        ls_run_setup    = b(g("ls_run_setup", True)),
+        ls_run_tests    = b(g("ls_run_tests", False)),
+        ls_test_groups  = pylist(g("ls_test_groups"), ["functional", "validation", "ui"]),
+        ls_test_cases   = pylist(g("ls_test_cases"), []),
+        ls_test_prefix  = s(g("ls_test_prefix") or "QA"),
+        ls_test_cleanup = b(g("ls_test_cleanup", True)),
         run_import_app        = b(g("run_import_app", False)),
         EXCEL_FILE            = p(g("EXCEL_FILE")),
         run_add_item          = b(g("run_add_item", False)),

@@ -2,6 +2,7 @@ import { Injectable, inject, signal } from '@angular/core';
 import { ModuleRegistryStore } from './module-registry.store';
 import { QueueStore } from './queue.store';
 import { RunConfig } from '../core/models/run-config.model';
+import { ACCOUNT_FIELDS, ToggleState, UomRow } from '../core/models/item-group.model';
 
 @Injectable({
   providedIn: 'root'
@@ -41,6 +42,10 @@ export class RunConfigStore {
   readonly cbUa = signal<boolean>(false);
   readonly cbAdhocRun = signal<boolean>(true);
   readonly cbNai2 = signal<boolean>(false);
+
+  /* Create Group sub-options (run_create_group / run_update_group) */
+  readonly cbCg = signal<boolean>(true);
+  readonly cbUg = signal<boolean>(false);
 
   /* Q_Setting */
   readonly qsAuditName = signal<string>('Audit_TEST');
@@ -156,12 +161,30 @@ export class RunConfigStore {
   readonly invType = signal<string>('Serialized');
   readonly invFields = signal<string[]>(['Item Code', 'Item Name']);
   readonly invIds = signal<string[]>(['Serial Number', 'IMEI', 'Barcode']);
+  /* Item Group tabs (defaults match backend/Config.py → Inventory Setup); blank / 'leave' = leave as is */
+  readonly invAccountingMode = signal<string>('Basic Accounting Mode');
+  readonly invCostingMethod = signal<string>('Weighted Average');
+  readonly invAccounts = signal<Record<string, string>>({ SaleAccountId: 'Sales Revenue', PurchaseAccountId: 'Purchase Expenses' });
+  readonly invAdvanced = signal<Record<string, ToggleState>>({ AllowDiscount: 'on', EditSalePrice: 'on' });
+  readonly invUomMode = signal<ToggleState>('on');
+  readonly invPrimaryUom = signal<string>('Bale');
+  readonly invUomValueType = signal<string>('Integer only');
+  readonly invSecondaryUoms = signal<UomRow[]>([{ uom: 'Box', quantity: 12, base: '' }]);
+  readonly invTertiaryUoms = signal<UomRow[]>([{ uom: 'Pallet', quantity: 25, base: 'Box' }]);
+  readonly invDefaultUom = signal<string>('');
 
   /* Location Setup */
   readonly lsZones = signal<string>('SA');
   readonly lsAisles = signal<string>('A1');
   readonly lsBays = signal<string>('B1');
   readonly lsLevels = signal<string>('L1');
+  /* Location Setup run options: add the locations and/or run the Warehouse tests (WH_001-WH_040) */
+  readonly lsRunSetup = signal<boolean>(true);
+  readonly lsRunTests = signal<boolean>(false);
+  readonly lsTestGroups = signal<string[]>(['functional', 'validation', 'ui']);
+  readonly lsTestCases = signal<string>('');
+  readonly lsTestPrefix = signal<string>('QA');
+  readonly lsTestCleanup = signal<boolean>(true);
 
   /* Import Items */
   readonly iiSheetName = signal<string>('Data');
@@ -190,6 +213,30 @@ export class RunConfigStore {
     const mapped = (val || '').trim();
     if (mapped === 'By Storage') return 'By Location';
     return mapped || 'Random';
+  }
+
+  /** Item Group tab settings for the run; blanks are dropped so the runner leaves those fields as they are. */
+  private itemGroupPayload() {
+    const mode = this.invAccountingMode();
+    const accounts = this.invAccounts();
+    const accountKeys = (ACCOUNT_FIELDS[mode || 'Basic Accounting Mode'] || []).map(f => f.key);
+    const uomRows = (rows: UomRow[]) => rows.filter(r => r.uom && r.quantity !== null);
+    const uomMode = this.invUomMode();
+
+    return {
+      inv_accounting_mode: mode || null,
+      inv_costing_method: this.invCostingMethod() || null,
+      inv_accounting_accounts: Object.fromEntries(accountKeys.filter(k => accounts[k]).map(k => [k, accounts[k]])),
+      inv_advanced_toggles: Object.fromEntries(
+        Object.entries(this.invAdvanced()).filter(([, s]) => s !== 'leave').map(([k, s]) => [k, s === 'on'])
+      ),
+      inv_enable_uom_conversions: uomMode === 'leave' ? null : uomMode === 'on',
+      inv_primary_uom: this.invPrimaryUom() || null,
+      inv_uom_value_type: this.invUomValueType() || null,
+      inv_secondary_uoms: uomRows(this.invSecondaryUoms()),
+      inv_tertiary_uoms: uomRows(this.invTertiaryUoms()),
+      inv_default_uom: this.invDefaultUom() || null,
+    };
   }
 
   /**
@@ -221,6 +268,11 @@ export class RunConfigStore {
         runFlags['run_timezone'] = isEnabled && tzOn;
         runFlags['run_create_Ad_hoc_Audit'] = isEnabled && ahOn;
         runFlags['run_update_audit'] = isEnabled && uaOn;
+      }
+
+      if (m.idx === 13) {
+        runFlags[m.flag] = isEnabled && this.cbCg();
+        runFlags['run_update_group'] = isEnabled && this.cbUg();
       }
     });
 
@@ -391,12 +443,19 @@ export class RunConfigStore {
       inventory_type: this.invType() || 'Serialized',
       inv_fields: this.invFields(),
       inv_ids: this.invIds(),
+      ...this.itemGroupPayload(),
 
       /* Location Setup */
       ls_zones: this.lsZones() || 'SA',
       ls_aisles: this.lsAisles() || 'A1',
       ls_bays: this.lsBays() || 'B1',
       ls_levels: this.lsLevels() || 'L1',
+      ls_run_setup: this.lsRunSetup(),
+      ls_run_tests: this.lsRunTests(),
+      ls_test_groups: this.lsTestGroups(),
+      ls_test_cases: this.lsTestCases(),
+      ls_test_prefix: this.lsTestPrefix() || 'QA',
+      ls_test_cleanup: this.lsTestCleanup(),
 
       /* Import Items */
       EXCEL_FILE: up['IMPORT_EXCEL'] || '',
