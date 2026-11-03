@@ -2,6 +2,7 @@ from asyncio import timeout
 import time
 import os
 import sys
+from datetime import datetime
 from typing import List, Optional, Tuple
 import pandas as pd
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
@@ -19,11 +20,27 @@ def normalize(text: str) -> str:
 
 
 # --------------------------------------------------------------
+# DYNAMIC STOCK AUDIT PAGE (v2) SELECTORS — used by A_SA
+# --------------------------------------------------------------
+ASV2_ITEM_SEARCH    = "app-audit-stock-v2 p-autocomplete#autoComplete input.p-autocomplete-input"
+ASV2_SUGGESTION     = "li.p-autocomplete-item"
+ASV2_ITEM_LOADED    = "app-audit-stock-v2 section.asv2-item:not(.is-empty)"
+ASV2_AUDIT_LOCATION = "app-audit-stock-v2 div.asv2-location app-location-tree-select p-treeselect"
+ASV2_AUDITED_QTY    = "app-audit-stock-v2 input[formcontrolname='auditedQty']"
+ASV2_DAMAGED_QTY    = "app-audit-stock-v2 input[formcontrolname='damagedQty']"
+ASV2_ADD_COUNT_BTN  = "app-audit-stock-v2 button.asv2-submit"
+ASV2_ADD_ITEM_BTN   = "app-audit-stock-v2 button.asv2-add-item"
+ASV2_CONTINUOUS     = "app-audit-stock-v2 .asv2-switch p-inputswitch"
+ASV2_LIST_REFRESH   = "app-audit-stock-list-v2 button[aria-label='Refresh']"
+ASV2_LIST_COUNT     = "app-audit-stock-list-v2 span.aslv2-count-pill"
+
+
+# --------------------------------------------------------------
 # ENABLE CONTINUOUS COUNT
 # --------------------------------------------------------------
 def enable_continuous_count(page) -> None:
-    toggle = page.locator("p-inputswitch")
-    if toggle.get_attribute("aria-checked") != "true":
+    toggle = page.locator(ASV2_CONTINUOUS)
+    if toggle.locator("input[role='switch']").get_attribute("aria-checked") != "true":
         toggle.click()
         page.wait_for_timeout(300)
         print("   Continuous Count ENABLED")
@@ -67,113 +84,64 @@ def A_SA(page, Config):
         )
         page.wait_for_timeout(0.06)
 
+    # Audit location currently chosen in the header tree (skip re-selecting it)
+    current_location = {"value": None}
+
     # --------------------------------------------------------------
-    # SELECT LOCATION - PrimeNG TreeSelect (Dialog scope)
+    # SELECT AUDIT LOCATION — header PrimeNG TreeSelect ("Select audit location")
+    # Typing the full path (e.g. "w1-4252") in the search box auto-selects the
+    # matching node; Escape closes the panel and keeps it. Clicking an already
+    # selected node would deselect it, so only click when it isn't selected.
     # --------------------------------------------------------------
-    def select_location_tree(page, value: str, timeout: int = 5000, retry: int = 2):
+    def select_location_inline(page, value: str, timeout: int = 7000) -> bool:
         if not value:
-            print("⚠️ Empty location value, skipping...")
-            return
-
-        for attempt in range(retry + 1):
-            try:
-                dialog = page.get_by_role("dialog")
-                dialog.wait_for(state="visible", timeout=timeout)
-
-                treeselect = dialog.locator("p-treeselect").first
-                treeselect.wait_for(state="visible", timeout=timeout)
-                treeselect.click()
-
-                panel = page.locator(".p-treeselect-panel").last
-                panel.wait_for(state="visible", timeout=timeout)
-                time.sleep(0.3)
-
-                search = panel.locator("input.location-search-input")
-                if search.count() > 0:
-                    search.fill("")
-                    search.fill(value)
-                    time.sleep(0.5)
-
-                parts = value.split("-")
-
-                for i, part in enumerate(parts):
-                    node = panel.locator(".p-treenode-content", has_text=part).first
-                    node.wait_for(state="visible", timeout=timeout)
-
-                    if i < len(parts) - 1:
-                        toggler = node.locator(".p-tree-toggler")
-                        if toggler.count() > 0:
-                            try:
-                                toggler.click()
-                            except:
-                                node.click()
-                        time.sleep(0.3)
-                    else:
-                        checkbox = node.locator(".p-checkbox")
-                        if checkbox.count() > 0:
-                            checkbox.click()
-                        else:
-                            node.click()
-
-                panel.wait_for(state="hidden", timeout=timeout)
-                print(f"   Location selected: {value}")
-                return
-
-            except TimeoutError:
-                print(f"⏳ Attempt {attempt+1}: Timeout, retrying...")
-            except Exception as e:
-                print(f"⚠️ Attempt {attempt+1} failed: {e}")
-
-            try:
-                page.keyboard.press("Escape")
-            except:
-                pass
-            time.sleep(1)
-
-        raise Exception(f" Failed to select location after retries: {value}")
-
-    # --------------------------------------------------------------
-    # SELECT LOCATION — INLINE CONTINUOUS COUNT ROW
-    # --------------------------------------------------------------
-    def select_location_inline(page, value: str, timeout: int = 7000):
-        if not value:
-            return
+            return False
+        if current_location["value"] == value:
+            return True
 
         try:
-            treeselect = page.locator("app-location-tree-select p-treeselect").first
+            treeselect = page.locator(ASV2_AUDIT_LOCATION).first
             treeselect.wait_for(state="visible", timeout=timeout)
-
-            trigger = treeselect.locator(".p-treeselect-trigger")
-            trigger.click()
+            treeselect.locator(".p-treeselect-trigger").click()
 
             panel = page.locator("div.p-treeselect-panel").last
             panel.wait_for(state="visible", timeout=timeout)
-            time.sleep(0.5)
+            page.wait_for_timeout(300)
 
-            search = panel.locator("input.location-search-input")
-            if search.count() > 0:
-                search.fill(value)
-                time.sleep(1)
+            panel.locator("input.location-search-input").fill(value)
+            page.wait_for_timeout(800)
 
+            last_part = value.split("-")[-1]
+            node = panel.locator(f"li[role='treeitem'][aria-label='{last_part}']").first
+            if panel.locator(".p-tree-empty-message").is_visible() or node.count() == 0:
+                print(f"   ⚠️ Location not found in audit location tree: {value}")
+                page.keyboard.press("Escape")
+                current_location["value"] = None
+                return False
 
+            if node.get_attribute("aria-selected") != "true":
+                node.locator(":scope > .p-treenode-content").click()
+                page.wait_for_timeout(300)
 
+            if panel.is_visible():
+                page.keyboard.press("Escape")
+            panel.wait_for(state="hidden", timeout=timeout)
 
-            page.keyboard.press("Escape")
-            print(f"   Location selected: {value}")
+            current_location["value"] = value
+            print(f"   Location selected: {treeselect.locator('.location-display').inner_text().strip()}")
+            return True
 
         except PlaywrightTimeoutError:
-            raise Exception(" Timeout while selecting location (inline treeselect)")
-        except Exception as e:
-            raise Exception(f" select_location_inline failed: {e}")
+            print(f"   ⚠️ Timeout while selecting audit location: {value}")
+            page.keyboard.press("Escape")
+            current_location["value"] = None
+            return False
 
     # --------------------------------------------------------------
     # CLICK ADD ITEM BUTTON
     # --------------------------------------------------------------
     def click_add_item_button(page, timeout: int = 7000) -> None:
-        try:
-            page.click("button.button.primary-button.me-3:has-text('Add Item')", timeout=timeout)
-        except Exception:
-            page.click("button:has-text('Add Item')", timeout=timeout)
+        page.click(ASV2_ADD_ITEM_BTN, timeout=timeout)
 
         page.wait_for_selector("div.p-dialog-mask", timeout=8000)
         page.wait_for_selector("div.p-dialog", timeout=8000)
@@ -182,6 +150,8 @@ def A_SA(page, Config):
 
     # --------------------------------------------------------------
     # FILL ITEM DETAILS — BOUND (dialog form fields)
+    # The v2 Add item dialog has no location field; location is set
+    # in the header tree when the count is added.
     # --------------------------------------------------------------
     def fill_item_details_bound(
         page,
@@ -190,7 +160,6 @@ def A_SA(page, Config):
         CATEGORY1: str = "",
         COST_PRICE1: str = "",
         SELL_PRICE1: str = "",
-        LOCATION1: str = "",
         BARCODE1: str = "",
         UOM1: str = "",
     ):
@@ -220,9 +189,6 @@ def A_SA(page, Config):
             dialog.locator("input[formcontrolname='sellPrice']").fill(SELL_PRICE1)
             page.wait_for_timeout(500)
 
-        if LOCATION1:
-            select_location_tree(page, LOCATION1)
-
         if BARCODE1:
             dialog.locator("input[formcontrolname='eanQr']").fill(BARCODE1)
             page.wait_for_timeout(500)
@@ -235,7 +201,7 @@ def A_SA(page, Config):
         page.wait_for_timeout(500)
 
     # --------------------------------------------------------------
-    # FILL ITEM DETAILS — UNBOUND (inline row after dialog closes)
+    # FILL ITEM DETAILS — UNBOUND (count the new item after dialog closes)
     # --------------------------------------------------------------
     def fill_item_details_unbound(
         page,
@@ -244,41 +210,20 @@ def A_SA(page, Config):
         audited_qty1: float,
         damaged_qty1: float
     ):
-        save_sel = "div.p-dialog-content div.dialog-content button.button.primary-button:has-text('Save')"
-        page.wait_for_selector(save_sel, timeout=6000)
-        page.locator(save_sel).first.click()
+        save_btn = page.locator(
+            "div.p-dialog-content div.dialog-content button.primary-button:has-text('Save')"
+        )
+        if save_btn.count() > 0 and save_btn.first.is_visible():
+            save_btn.first.click()
 
         page.wait_for_selector("div.p-dialog-mask", state="detached", timeout=8000)
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(200)
 
-        ac = page.locator("input.p-autocomplete-input[placeholder*='Item Code']").first
-        ac.scroll_into_view_if_needed()
-        ac.click()
-        ac.fill("")
-        ac.type(ITEM_CODE1, delay=50)
-
-        try:
-            page.wait_for_selector("li.p-autocomplete-item:visible", timeout=5000)
-            page.locator("li.p-autocomplete-item").first.click()
-        except PlaywrightTimeoutError:
-            page.keyboard.press("ArrowDown")
-            page.keyboard.press("Enter")
-
-        page.wait_for_timeout(200)
-
-        select_location_tree(page, LOCATION1)
-        page.wait_for_timeout(200)
-
-        page.fill('input[formcontrolname="auditedQty"]', str(audited_qty1))
-        page.fill('input[formcontrolname="damagedQty"]', str(damaged_qty1))
-
-        page.click("button:has-text('Add Count')")
-        detect_feedback(page)
-        page.wait_for_timeout(100)
+        add_item_count(page, ITEM_CODE1, audited_qty1, damaged_qty1, LOCATION1)
 
     # --------------------------------------------------------------
-    # ADD ITEM COUNT (INLINE — CONTINUOUS COUNT MODE)
+    # ADD ITEM COUNT (audit pane form)
     # --------------------------------------------------------------
     def add_item_count(
         page,
@@ -287,15 +232,23 @@ def A_SA(page, Config):
         damaged_qty: Optional[float],
         location: str,
     ) -> bool:
-        ac = page.locator("input.p-autocomplete-input[placeholder*='Item Code']").first
+        if location:
+            if not select_location_inline(page, location):
+                return False
+        else:
+            print("   ⚠️ Empty Location — skipping location selection")
+
+        ac = page.locator(ASV2_ITEM_SEARCH).first
         ac.scroll_into_view_if_needed()
         ac.click()
         ac.fill("")
         ac.type(item_query, delay=50)
 
         try:
-            page.wait_for_selector("li.p-autocomplete-item:visible", timeout=5000)
-            page.locator("li.p-autocomplete-item").first.click()
+            page.wait_for_selector(f"{ASV2_SUGGESTION}:visible", timeout=5000)
+            exact = page.locator(f"{ASV2_SUGGESTION}[aria-label^='{item_query} - ']")
+            (exact if exact.count() > 0 else page.locator(ASV2_SUGGESTION)).first.click()
+            page.wait_for_selector(ASV2_ITEM_LOADED, timeout=5000)
         except PlaywrightTimeoutError:
             print(f"⚠️ No autocomplete suggestion found for item: {item_query}")
             try:
@@ -306,24 +259,33 @@ def A_SA(page, Config):
 
         page.wait_for_timeout(100)
 
-        if location:
-            select_location_inline(page, location)
-        else:
-            print("   ⚠️ Empty Location — skipping location selection")
-        page.wait_for_timeout(200)
-
-        page.fill('input[formcontrolname="auditedQty"]', str(audited_qty))
+        page.fill(ASV2_AUDITED_QTY, str(audited_qty))
 
         if damaged_qty is not None:
-            page.fill('input[formcontrolname="damagedQty"]', str(damaged_qty))
+            page.fill(ASV2_DAMAGED_QTY, str(damaged_qty))
         else:
             print("   ⚠️ Empty Damaged Qty — skipping damaged quantity fill")
 
-        page.click("button:has-text('Add Count')")
+        page.click(ASV2_ADD_COUNT_BTN)
+        confirm_location_mismatch(page)
         detect_feedback(page)
         page.wait_for_timeout(200)
 
         return True
+
+    # --------------------------------------------------------------
+    # LOCATION MISMATCH PROMPT (audited location != item's stock location)
+    # The Excel row says where the item was counted, so proceed.
+    # --------------------------------------------------------------
+    def confirm_location_mismatch(page, timeout: int = 1500) -> None:
+        popup = page.locator(".swal2-popup:visible", has_text="Location Mismatch")
+        try:
+            popup.wait_for(state="visible", timeout=timeout)
+        except PlaywrightTimeoutError:
+            return
+        popup.locator("button.swal2-confirm").click()
+        popup.wait_for(state="hidden", timeout=5000)
+        print("   ⚠️ Location mismatch confirmed (audited location differs from stock location)")
 
     # --------------------------------------------------------------
     # NEW ADD ITEM (optional pre-audit item creation)
@@ -338,7 +300,6 @@ def A_SA(page, Config):
             Config.CATEGORY1,
             Config.COST_PRICE1,
             Config.SELL_PRICE1,
-            Config.LOCATION1,
             Config.BARCODE1,
             Config.UOM1,
         )
@@ -447,13 +408,19 @@ def A_SA(page, Config):
     # CLICK AUDIT ROW
     # --------------------------------------------------------------
     def click_audit(page, ap_audit_name):
-        page.wait_for_load_state("networkidle")
+        try:
+            page.wait_for_load_state("networkidle", timeout=10000)   # the list keeps polling at times
+        except Exception:
+            pass
 
-        # Find and click the specific audit using ap_audit_name
-        row = page.locator(
-            f"table tbody tr:has(button.audit-name-link:has-text('{ap_audit_name}'))"
-        ).first
-        row.locator("button.audit-name-link").first.click()
+        # Long names are shown truncated ("QA_FC_explore_1..."); the full name is the cell's title
+        page.wait_for_selector("button.audit-name-link", timeout=30000)
+        link = page.locator(f"table tbody td[title='{ap_audit_name}'] button.audit-name-link")
+        if link.count() == 0:
+            link = page.locator(
+                f"table tbody tr:has(button.audit-name-link:has-text('{ap_audit_name}')) button.audit-name-link"
+            )
+        link.first.click()
         print(f"   Opened audit: {ap_audit_name}")
 
     def select_navigation_option(page, option_name: str):
@@ -516,6 +483,11 @@ def A_SA(page, Config):
 
         items_to_add = load_items_from_excel()
 
+        # Baseline for the post-run checks
+        list_count_before = read_list_count(page)
+        run_started       = datetime.now()
+        entered           = []   # (code, audited, damaged, audit location in effect)
+
         # ── Bulk loop ──────────────────────────────────────────────
         success_count = 0
         fail_count    = 0
@@ -529,6 +501,7 @@ def A_SA(page, Config):
                       f"(Audited: {audited}, Damaged: {damaged})")
                 detect_feedback(page)
                 success_count += 1
+                entered.append((code, audited, damaged, current_location["value"]))
             else:
                 print(f" [{idx}/{len(items_to_add)}] Failed: {code}")
                 fail_count += 1
@@ -537,10 +510,17 @@ def A_SA(page, Config):
 
         print(f"\n📊 Summary: {success_count} succeeded, {fail_count} failed")
 
+        # Feature checks + cross-check: list, Count summary, Finish (declaration), Audit Summary
+        if getattr(Config, "run_asv2_checks", False):
+            return run_stock_audit_checks(page, Config, entered, list_count_before, run_started)
+
     # --------------------------------------------------------------
     # ENTRY POINT
     # --------------------------------------------------------------
-    navigate_to_ongoing_audits(page, Config)
+    # Imported here: stock_audit_checks imports this module's selectors
+    from audit.stock_audit_checks import read_list_count, run_stock_audit_checks
+
+    return navigate_to_ongoing_audits(page, Config)
 def S_SA(page, Config):
 
     # ----------------------
@@ -1049,5 +1029,6 @@ def stock_audit(page, Config):
         S_SA(page, Config)
         print("\n   Static Stock Audit completed.")
     else:
-        A_SA(page, Config)
+        result = A_SA(page, Config)
         print("\n   Dynamic Stock Audit completed.")
+        return result

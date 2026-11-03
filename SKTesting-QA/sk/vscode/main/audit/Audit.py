@@ -23,6 +23,7 @@ from Auditor_2 import stock_audit2
 from A_as_table import A_as_table
 from A_audit_Summary import A_audit_Summary
 from A_Recently_audit import A_Recently_Audit
+from audit.finish_complete_flow import run_finish_complete
 
 
 
@@ -102,6 +103,7 @@ class Config:
     run_setup_Audit = False
 #=============================================================
     run_stock_audit = True
+    run_asv2_checks = True   # after the counts: test page features + cross-check list / Count summary / Finish / Audit Summary
     #add item details for auditor 1
     run_new_add_item = False
     ITEM_CODE1 = "ABC1123"
@@ -168,6 +170,15 @@ class Config:
     FILTER_COLUMN = "filter"
     run_A_Recently_Audit = True
     EXCEL_SHEET_Recently_Audit = "Recently_Audit"
+
+    # Finish → Declaration → Resolution → Complete (creates AND closes a new audit each run)
+    run_finish_complete = False
+    fc_audit_prefix = "QA_FC"
+    fc_auditor = "dine"                      # logged-in auditor; only auditor on the new audit
+    fc_unverified_choice = "Move to Not Found"   # or "Keep as Unverified"
+    fc_closure_note = "QA automated finish/complete run"
+    EXCEL_SHEET_fc_counts = "fc_counts"
+    EXCEL_SHEET_finish_flow = "finish_flow"
 #=============================================================
 if __name__ == "__main__":
     with sync_playwright() as p:
@@ -243,4 +254,8 @@ if __name__ == "__main__":
             A_Recently_Audit(page, Config)
         else:
             print(" A_Recently_Audit skipped")
+        if Config.run_finish_complete:
+            run_finish_complete(page, Config)
+        else:
+            print(" finish_complete skipped")
         browser.close()

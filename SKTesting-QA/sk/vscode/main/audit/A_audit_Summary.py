@@ -67,23 +67,41 @@ FILTER_MERGE_MAP: Dict[str, List[str]] = {
 }
 
 # ── full UI column → td index map ────────────────────────────────────
+# Fallback only: extract_row uses the index read from the table header
+# (see refresh_column_index), because the column order changes between releases.
 ALL_UI_COLUMNS: Dict[str, int] = {
     "Item Code":        1,
     "Item Name":        2,
-    "UOM":              3,
-    "Stock Quantity":   4,
-    "Audited Qty":      5,
-    "Variance":         6,
-    "Variance Value":   7,
-    "Variance Type":    8,
-    "Damaged Qty":      9,
-    "Auditor Name":     10,
-    "Audited DateTime": 11,
-    "Audited Image":    12,
-    "Stock Location":   13,
-    "Audited Location": 14,
-    "Reason":           15,
-    "Geo Location":     16,
+    "Category":         3,
+    "Stock Location":   4,
+    "Audited Location": 5,
+    "UOM":              6,
+    "Stock Quantity":   7,
+    "Audited Qty":      8,
+    "Variance":         9,
+    "Variance Value":   10,
+    "Variance Type":    11,
+    "Variance History": 12,
+    "Damaged Qty":      13,
+    "Auditor Name":     14,
+    "Audited DateTime": 15,
+    "Audited Image":    16,
+    "Cross AuditedQty": 17,
+    "Cross DamagedQty": 18,
+    "Reason":           19,
+    "Geo Location":     20,
+    "Resolution Status": 21,
+    "Remarks":          22,
+}
+
+# Field name (as used in the Excel sheet) → UI header text, where they differ
+UI_HEADER_ALIASES: Dict[str, str] = {
+    "UOM":              "UOM (Base)",
+    "Audited Qty":      "Audited Quantity",
+    "Auditor Name":     "Auditor",
+    "Audited DateTime": "Audited Date",
+    "Reason":           "Declaration Note",
+    "Geo Location":     "Coordinates",
 }
 
 # ── config ───────────────────────────────────────────────────────────
@@ -212,10 +230,21 @@ def print_load_summary(grouped, active_fields):
     print()
 
 # ── UI row extraction ────────────────────────────────────────────────
+_col_index: Dict[str, int] = {}
+
+def refresh_column_index(page) -> None:
+    """Map each field to its td index using the summary table's header row."""
+    headers = [_nh(h) for h in page.locator("thead.p-datatable-thead th").all_inner_texts()]
+    _col_index.clear()
+    for fn in ALL_UI_COLUMNS:
+        h = _nh(UI_HEADER_ALIASES.get(fn, fn))
+        if h in headers:
+            _col_index[fn] = headers.index(h)
+
 def extract_row(row) -> Dict[str, str]:
     cells = row.locator("td")
-    data  = {}
-    for fn, idx in ALL_UI_COLUMNS.items():
+    data  = {fn: "" for fn in ALL_UI_COLUMNS}
+    for fn, idx in (_col_index or ALL_UI_COLUMNS).items():
         try:
             cell = cells.nth(idx)
             data[fn] = "yes" if fn == "Audited Image" and cell.locator("img").count() > 0 \
@@ -309,6 +338,7 @@ def collect_all(page, cfg) -> List[Dict]:
         print(f"  {c('⚠ No table body visible — 0 rows for this filter',Y)}")
         return []
 
+    refresh_column_index(page)
     seen, all_rows = set(), []
     while True:
         all_rows.extend(scroll_and_collect(page, cfg, seen))
@@ -552,7 +582,28 @@ def select_navigation_option(page, option_name: str):
         )
         card.click()
 
-        page.locator("button.create-type-btn--primary:has-text('Continue')").click()
+        # Older builds asked to confirm with "Continue"; the current one navigates directly
+        cont = page.locator("button.create-type-btn--primary:has-text('Continue')")
+        try:
+            cont.wait_for(state="visible", timeout=1500)
+            cont.click()
+        except Exception:
+            pass
+
+        if option_name == "Audit Summary":
+            page.wait_for_url("**/auditSummary", timeout=20000)
+            # Badges and totals render as "(0)" before the data arrives; wait for the
+            # status and the All badge (an audit with no lines just waits out the timeout)
+            try:
+                page.wait_for_function(
+                    """() => {
+                        const status = document.querySelector('app-audit-summary div.status-pill');
+                        const all = document.querySelector('app-audit-summary span.badge-custom');
+                        return status && status.innerText.trim() !== 'Unknown'
+                            && all && !/\\(0\\)\\s*$/.test(all.innerText.trim());
+                    }""", timeout=30000)
+            except Exception:
+                pass
 def select_branch(page, branch):
     dd = page.locator('xpath=//div[@data-tour-id="header-branch"]//p-dropdown').first
     dd.locator(".p-dropdown-label").click()
@@ -564,11 +615,18 @@ def select_branch(page, branch):
     panel.wait_for(state="hidden")
 
 def click_audit(page, ap_audit_name):
-    page.wait_for_load_state("networkidle")
-    row = page.locator(
-        f"table tbody tr:has(button.audit-name-link:has-text('{ap_audit_name}'))"
-    ).first
-    row.locator("button.audit-name-link").first.click()
+    try:
+        page.wait_for_load_state("networkidle", timeout=10000)   # the list keeps polling at times
+    except Exception:
+        pass
+    # Long names are shown truncated ("QA_FC_explore_1..."); the full name is the cell's title
+    page.wait_for_selector("button.audit-name-link", timeout=30000)
+    link = page.locator(f"table tbody td[title='{ap_audit_name}'] button.audit-name-link")
+    if link.count() == 0:
+        link = page.locator(
+            f"table tbody tr:has(button.audit-name-link:has-text('{ap_audit_name}')) button.audit-name-link"
+        )
+    link.first.click()
     print(f"   Opened audit: {ap_audit_name}")
 
 def navigate_to_audit(page, config):

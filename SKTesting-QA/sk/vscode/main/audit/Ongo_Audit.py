@@ -69,7 +69,13 @@ def Ongo_Audit(page, Config):
         )
         card.click()
 
-        page.locator("button.create-type-btn--primary:has-text('Continue')").click()
+        # Older builds asked to confirm with "Continue"; the current one navigates directly
+        cont = page.locator("button.create-type-btn--primary:has-text('Continue')")
+        try:
+            cont.wait_for(state="visible", timeout=1500)
+            cont.click()
+        except Exception:
+            pass
     # --------------------------------------------------------------
     # WAIT FOR MAPPING ROWS
     # --------------------------------------------------------------
@@ -507,13 +513,19 @@ def Ongo_Audit(page, Config):
     # CLICK AUDIT ROW
     # --------------------------------------------------------------
     def click_audit(page, ap_audit_name):
-        page.wait_for_load_state("networkidle")
+        try:
+            page.wait_for_load_state("networkidle", timeout=10000)   # the list keeps polling at times
+        except Exception:
+            pass
 
-        # Find and click the specific audit using ap_audit_name
-        row = page.locator(
-            f"table tbody tr:has(button.audit-name-link:has-text('{Config.ap_audit_name}'))"
-        ).first
-        row.locator("button.audit-name-link").first.click()
+        # Long names are shown truncated ("QA_FC_explore_1..."); the full name is the cell's title
+        page.wait_for_selector("button.audit-name-link", timeout=30000)
+        link = page.locator(f"table tbody td[title='{Config.ap_audit_name}'] button.audit-name-link")
+        if link.count() == 0:
+            link = page.locator(
+                f"table tbody tr:has(button.audit-name-link:has-text('{Config.ap_audit_name}')) button.audit-name-link"
+            )
+        link.first.click()
         print(f"   Opened audit: {Config.ap_audit_name}")
 
     # --------------------------------------------------------------
@@ -547,11 +559,7 @@ def Ongo_Audit(page, Config):
 
         set_checkbox(page, "input[formcontrolname='IsDamageQty']",       Config.A_Checkboxes_Audit_Damaged)
         print(f"   Set IsDamageQty = {Config.A_Checkboxes_Audit_Damaged}")
-        set_checkbox(
-    page,
-    "xpath=//label[normalize-space(text())='Enable Blind Count']/ancestor::div[contains(@class,'row')][1]//input[@type='checkbox']",
-    Config.A_Checkboxes_BlindCount
-)
+        set_checkbox(page, "input[formcontrolname='enableBlindCount']",  Config.A_Checkboxes_BlindCount)
         print(f"   Set BlindCount = {Config.A_Checkboxes_BlindCount}")
         set_checkbox(page, "input[formcontrolname='isGeoLocation']",     Config.A_Checkboxes_geo)
         print(f"   Set isGeoLocation = {Config.A_Checkboxes_geo}")
@@ -567,12 +575,47 @@ def Ongo_Audit(page, Config):
         time.sleep(SLEEP_TIME)
                 # "Random" â†’ nothing extra; "By Category"/"By Storage" ’ assign from sheet
         
+        # The import leaves a "Processing…" popup up; it keeps that title and shows
+        # "Completed 100%" with an OK button when done.
+        for _ in range(120):
+            popup = page.locator(".swal2-popup:visible")
+            if popup.count() == 0:
+                break
+            text = popup.first.inner_text()
+            confirm = popup.first.locator("button.swal2-confirm:visible")
+            # OK stays disabled while the import is still processing
+            if ("Processing" not in text or "Completed" in text) and confirm.count() and confirm.first.is_enabled():
+                try:
+                    confirm.first.click(timeout=3000)
+                except Exception:
+                    pass
+            page.wait_for_timeout(1000)
+
+        # "Audit progress" guide panel slides in after the import
+        # (when closed it stays in the DOM, parked outside the viewport)
+        guide_close = page.locator("app-audit-guide-panel button.agp-close")
+        if guide_close.count() and guide_close.evaluate(
+                "e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.left < innerWidth && r.right > 0 }"):
+            guide_close.click()
+            page.wait_for_timeout(500)
+
         mapping_type = Config.AUDIT_MAPPING_TYPE
-        page.locator("p-dropdown[formcontrolname='auditMappingType']").click()
+        mapping_dd = page.locator("p-dropdown[formcontrolname='auditMappingType']")
+        try:
+            mapping_dd.wait_for(state="visible", timeout=15000)
+        except Exception:
+            # still on the Audit Import page: go back to the settings
+            page.locator("a", has_text="Audit Settings").first.click()
+            mapping_dd.wait_for(state="visible", timeout=30000)
+        if mapping_dd.locator(".p-dropdown-label").inner_text().strip() == mapping_type:
+            print(f"   Mapping type already {mapping_type}")
+            return      # nothing changed, so Update stays disabled
+
+        mapping_dd.click()
         page.locator("li.p-dropdown-item", has_text=mapping_type).click()
         time.sleep(SLEEP_TIME)
-        apply_auditor_assignments(page, mapping_type, Config) 
-        
+        apply_auditor_assignments(page, mapping_type, Config)
+
         time.sleep(SLEEP_TIME)
 
         page.click("button:has-text('Update')")

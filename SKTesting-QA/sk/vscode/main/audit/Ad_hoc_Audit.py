@@ -1,3 +1,4 @@
+import re
 import time
 
 
@@ -29,7 +30,7 @@ def Ad_hoc_Audit(page, Config):
         dropdown.locator('[aria-label="dropdown trigger"]').click()
         # The panel is appended to body
         panel = page.locator(
-            "div.new-prime-panel.p-dropdown-panel"
+            "div.new-prime-panel.p-dropdown-panel:visible"
         ).last
 
         panel.wait_for(
@@ -37,20 +38,12 @@ def Ad_hoc_Audit(page, Config):
             timeout=30000
         )
 
-        # Search Item Group
-        search = panel.locator(
-            "input.p-dropdown-filter"
-        )
-
-        search.wait_for(
-            state="visible",
-            timeout=30000
-        )
-
-        search.fill("")
-        search.fill(Group_Name)
-
-        page.wait_for_timeout(500)
+        # Search Item Group (the filter input's class changed between builds)
+        search = panel.locator("input").first
+        if search.count() > 0 and search.is_visible():
+            search.fill("")
+            search.fill(Group_Name)
+            page.wait_for_timeout(500)
 
         # Select exact matching option
         option = panel.locator(
@@ -58,7 +51,7 @@ def Ad_hoc_Audit(page, Config):
         ).filter(
             has=page.locator(
                 "span.gsd-name",
-                has_text=Group_Name
+                has_text=re.compile(rf"^\s*{re.escape(Group_Name)}\s*$")
             )
         ).first
 
@@ -167,12 +160,14 @@ def Ad_hoc_Audit(page, Config):
         # --------------------------------------------------------------
         # CLICK CONTINUE
         # --------------------------------------------------------------
-        page.get_by_role(
-            "button",
-            name="Continue"
-        ).click()
-
-        print("   Continue clicked")
+        # Older builds needed "Continue"; the current one opens the form on card click
+        cont = page.get_by_role("button", name="Continue")
+        try:
+            cont.wait_for(state="visible", timeout=1500)
+            cont.click()
+            print("   Continue clicked")
+        except Exception:
+            pass
 
         time.sleep(SLEEP_TIME)
 
