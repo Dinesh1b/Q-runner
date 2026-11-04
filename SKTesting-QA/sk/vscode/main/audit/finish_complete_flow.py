@@ -260,6 +260,12 @@ def step_resolution_actions(page, Config, res, plan, st):
         res.check(area, f"{code} variance value = summary",
                   _num(r[idx["VARIANCE VALUE"]]) == _num(srow.get("Variance Value")),
                   f"page={r[idx['VARIANCE VALUE']]} summary={srow.get('Variance Value')}")
+        cost = st.get("cost", {}).get(code.upper())
+        if cost is not None:
+            want = _num(r[idx["VARIANCE"]]) * cost
+            res.check(area, f"{code} variance value = variance x cost price",
+                      _num(r[idx["VARIANCE VALUE"]]) == want,
+                      f"page={r[idx['VARIANCE VALUE']]} expected={r[idx['VARIANCE']]} x {cost:g} = {want:g}")
         declared = st.get("declared", {}).get(code)
         if declared:
             res.check(area, f"{code} declaration note carried over", r[idx["DECLARATION NOTE"]] == declared,
@@ -387,6 +393,16 @@ def watch_adjustment_context(page, st):
     page.on("response", on_response)
 
 
+def _matched_codes(st):
+    """Items whose Audit Summary variance is 0 (they are not part of resolution)."""
+    return sorted(c for c, r in st.get("summary", {}).items()
+                  if r.get("Variance", "").strip() != "-" and _num(r.get("Variance")) == 0)
+
+
+def st_codes(rows, idx):
+    return [r[idx["ITEM CODE"]] for r in rows]
+
+
 def step_resolution_summary(page, Config, res, plan, st):
     area = "Resolution summary"
     _go_to_resolution_summary(page, Config, res, st)
@@ -402,7 +418,8 @@ def step_resolution_summary(page, Config, res, plan, st):
         res.check(area, "Accept / Recount / Investigate counts", (acc, rec, inv) == (want["Accept"], want["Recount"], want["Investigate"]),
                   f"page={acc}/{rec}/{inv} sheet={want['Accept']}/{want['Recount']}/{want['Investigate']}")
         res.check(area, "Total variance lines = actioned lines", total == acc + rec + inv,
-                  f"total={total} actioned={acc + rec + inv}")
+                  f"total={total} actioned={acc + rec + inv}"
+                  + (f" (matched items counted: {_matched_codes(st)})" if total > acc + rec + inv else ""))
     else:
         res.check(area, "Summary cards shown", False, text[:60])
 
@@ -425,8 +442,14 @@ def step_resolution_summary(page, Config, res, plan, st):
         note = _entry(plan, code)["note"]
         if note:
             res.check(area, f"{code} note", r[idx["DECLARATION NOTE"]] == note, r[idx["DECLARATION NOTE"]])
-    res.check(area, "No item left Pending", not pending,
-              f"pending={pending} (matched items cannot be actioned)" if pending else "")
+    # Matched items (variance 0) are not part of resolution by design
+    matched = set(_matched_codes(st))
+    listed = sorted(c for c in st_codes(rows, idx) if c.upper() in matched)
+    res.check(area, "Matched items not listed in the resolution summary", not listed,
+              f"matched items shown as Pending: {listed}" if listed else "")
+    variance_pending = [c for c in pending if c.upper() not in matched]
+    res.check(area, "No variance item left Pending", not variance_pending,
+              f"pending={variance_pending}" if variance_pending else "")
     st["resolution_rows"] = {r[idx["ITEM CODE"]]: r for r in rows}
     st["resolution_idx"] = idx
 
@@ -454,6 +477,14 @@ def step_resolution_summary(page, Config, res, plan, st):
         res.check(area, f"{code} adjustment = variance", adj == _num(r[idx["VARIANCE"]]),
                   f"adjust={adj:g} variance={r[idx['VARIANCE']]} lines="
                   f"{list(zip(lines['Location'].astype(str), lines['Adjustment Qty']))}")
+        for _, line in lines.iterrows():
+            qty, unit, value = float(line["Adjustment Qty"]), float(line["Unit Cost Price"]), float(line["Adjustment Value"])
+            res.check(area, f"{code} adjustment value = qty x unit cost", value == qty * unit,
+                      f"{line['Location']}: {value:g} vs {qty:g} x {unit:g}")
+        cost = st.get("cost", {}).get(code.upper())
+        if cost is not None and len(lines):
+            units = sorted(set(lines["Unit Cost Price"].astype(float)))
+            res.check(area, f"{code} unit cost = item cost price", units == [cost], f"report={units} item={cost:g}")
 
 
 # --------------------------------------------------------------
@@ -469,7 +500,14 @@ def step_complete(page, Config, res, st):
     if popup.count():
         text = _clean(popup.last.inner_text())
         if "Pending" in text:
-            res.check(area, "Complete Audit accepted", False, text[:100])
+            rows = st.get("resolution_rows", {})
+            idx = st.get("resolution_idx", {})
+            pending = [c for c, r in rows.items() if idx and r[idx["STATUS"]] == "Pending"]
+            matched = set(_matched_codes(st))
+            only_matched = pending and all(c.upper() in matched for c in pending)
+            res.check(area, "Complete Audit accepted", False,
+                      (f"blocked by matched items that are not part of resolution {pending}: " if only_matched else "")
+                      + text[:100])
             popup.last.locator("button.swal2-confirm").click()
             return
         popup.last.locator("button.swal2-confirm").click()

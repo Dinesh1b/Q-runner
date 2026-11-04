@@ -24,6 +24,8 @@ from A_as_table import A_as_table
 from A_audit_Summary import A_audit_Summary
 from A_Recently_audit import A_Recently_Audit
 from audit.finish_complete_flow import run_finish_complete
+from audit.e2e_stock_audit import run_e2e_stock_audit
+from audit.settings_tests import run_settings_tests
 
 
 
@@ -49,7 +51,7 @@ class Config:
         password = None
 
     email2 = "haffirauttiyoi-4022@yopmail.com"  # Auditor 2 credentials
-    password2 = "BgjONdA2"
+    password2 = "1235678"
 
     browsername = "chrome"
     environments = "QA"  # production, staging, development
@@ -179,6 +181,20 @@ class Config:
     fc_closure_note = "QA automated finish/complete run"
     EXCEL_SHEET_fc_counts = "fc_counts"
     EXCEL_SHEET_finish_flow = "finish_flow"
+
+    # End-to-end stock audit: group > items > audit > stock sheet > count > summary >
+    # complete > resolution > final verification (creates a group, 7 items and an audit each run)
+    run_e2e_stock_audit = False
+    e2e_prefix = "QA_E2E"
+    e2e_inventory_type = "Unit"              # Batch / Serial: later
+    e2e_category = "GMA"
+    e2e_uom = "kg"
+    e2e_output_dir = r"C:\Users\HP\Videos\QA_E2E"   # run folder + Stock_Audit_E2E_<run>.xlsx
+
+    # Audit Settings page test cases (TC-SET-xx); settings + stock sheet are restored afterwards
+    run_settings_tests = False
+    settings_audit_name = "QA_FC_1102_1907"
+    settings_second_auditor = "Dinesh"
 #=============================================================
 if __name__ == "__main__":
     with sync_playwright() as p:
@@ -258,4 +274,12 @@ if __name__ == "__main__":
             run_finish_complete(page, Config)
         else:
             print(" finish_complete skipped")
+        if Config.run_e2e_stock_audit:
+            run_e2e_stock_audit(page, Config)
+        else:
+            print(" e2e_stock_audit skipped")
+        if Config.run_settings_tests:
+            run_settings_tests(page, Config)
+        else:
+            print(" settings_tests skipped")
         browser.close()

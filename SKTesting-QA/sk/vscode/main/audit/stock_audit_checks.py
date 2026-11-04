@@ -371,15 +371,19 @@ def check_finish_declaration(page, res: Results, state: dict) -> None:
     head = re.split(r"\bS\.?\s?NO\b", text, maxsplit=1, flags=re.I)[0]   # text above the table only
     progress = re.search(r"(\d+)\s+of\s+(\d+)\s+discrepancies declared", head, re.I)
     chips = {name.strip().upper(): int(n) for n, name in
-             re.findall(r"(\d+)\s+(ITEMS|POSITIVE VARIANCE|EXCESS LINEITEM|NEGATIVE VARIANCE|NOT FOUND)\b", head, re.I)}
+             re.findall(r"(\d+)\s+(ITEMS|POSITIVE VARIANCE|EXCESS LINEITEM|NEGATIVE VARIANCE|NOT FOUND|UNVERIFIED)\b",
+                        head, re.I)}
     idx, rows = _table(page, DECLARATION)
     state["declaration"] = {r[idx["ITEM CODE"]]: r for r in rows}
     state["declaration_idx"] = idx
+    # uncounted items are listed as "Un Verified" and are not declared
+    declarable = [r for r in rows if "un verified" not in r[idx["DISCREPANCY TYPE"]].lower()]
 
     res.check(area, "Opens declaration page", True, progress.group(0) if progress else text[:60])
-    res.check(area, "Item rows = ITEMS chip = progress total",
-              chips.get("ITEMS") == len(rows) and (not progress or int(progress.group(2)) == len(rows)),
-              f"rows={len(rows)} chips={chips}")
+    res.check(area, "Item rows = ITEMS chip", chips.get("ITEMS") == len(rows), f"rows={len(rows)} chips={chips}")
+    res.check(area, "Progress total = declarable discrepancies",
+              not progress or int(progress.group(2)) == len(declarable),
+              f"progress={progress.group(0) if progress else '-'} declarable={len(declarable)}")
     res.check(area, "Discrepancy chips add up to ITEMS",
               sum(v for k, v in chips.items() if k != "ITEMS") == chips.get("ITEMS"), str(chips))
 
@@ -390,7 +394,7 @@ def check_finish_declaration(page, res: Results, state: dict) -> None:
         if stock == 0 and audited > 0:
             ok = "excess" in kind
         elif audited == 0 and stock > 0:
-            ok = "not found" in kind or "negative" in kind
+            ok = "not found" in kind or "negative" in kind or "un verified" in kind
         elif audited > stock:
             ok = "positive" in kind and f"({audited - stock:g})" in kind
         else:
@@ -549,7 +553,8 @@ def run_stock_audit_checks(page, Config, entered: List[Entered], list_count_befo
     print("\n" + "-" * 70)
     print("🔷 STOCK AUDIT v2 — FEATURE CHECKS + CROSS-CHECK")
     print("-" * 70)
-    res, state = Results(), {}
+    # An end-to-end run can collect these checks into its own Results
+    res, state = getattr(Config, "asv2_results", None) or Results(), {}
     res.section("Toolbar", check_toolbar, page, res, state)
     res.section("Recently audited list", check_list, page, res, state, entered, list_count_before)
     res.section("Count summary", check_count_summary, page, res, state, entered, run_started)
