@@ -17,8 +17,13 @@ BIZ RULES:
   Damaged Report     → Damaged Qty > 0
 """
 
+import math
+import os
 import re
 import sys
+import zlib
+from collections import Counter, OrderedDict, defaultdict
+from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Set, Optional
 from dataclasses import dataclass
@@ -604,7 +609,15 @@ def select_navigation_option(page, option_name: str):
                     }""", timeout=30000)
             except Exception:
                 pass
+def wait_spinner(page, timeout=90000):
+    """The loading spinner's backdrop takes every click until the data has arrived."""
+    try:
+        page.wait_for_selector("app-spinner div.backdrop", state="hidden", timeout=timeout)
+    except Exception:
+        pass
+
 def select_branch(page, branch):
+    wait_spinner(page)
     dd = page.locator('xpath=//div[@data-tour-id="header-branch"]//p-dropdown').first
     dd.locator(".p-dropdown-label").click()
     panel = page.locator(".p-dropdown-panel").last
@@ -614,30 +627,47 @@ def select_branch(page, branch):
     panel.locator("li.p-dropdown-item", has_text=branch).first.click()
     panel.wait_for(state="hidden")
 
+def audit_row(page, ap_audit_name):
+    """The audit's row in the audit list. Long names are shown truncated ("QA_FC_explore_1..."),
+    the full name is the cell's title; a recount adds a second row with the same name
+    (Type "Recount Audit") that opens the recount screen instead."""
+    rows = page.locator("table tbody tr").filter(has=page.locator(f"td[title='{ap_audit_name}']"))
+    if rows.count() == 0:
+        rows = page.locator("table tbody tr").filter(
+            has=page.locator("button.audit-name-link", has_text=ap_audit_name))
+    main = rows.filter(has_not_text="Recount Audit")
+    return main.first if main.count() else rows.first
+
 def click_audit(page, ap_audit_name):
     try:
         page.wait_for_load_state("networkidle", timeout=10000)   # the list keeps polling at times
     except Exception:
         pass
-    # Long names are shown truncated ("QA_FC_explore_1..."); the full name is the cell's title
+    wait_spinner(page)
     page.wait_for_selector("button.audit-name-link", timeout=30000)
-    link = page.locator(f"table tbody td[title='{ap_audit_name}'] button.audit-name-link")
-    if link.count() == 0:
-        link = page.locator(
-            f"table tbody tr:has(button.audit-name-link:has-text('{ap_audit_name}')) button.audit-name-link"
-        )
-    link.first.click()
+    audit_row(page, ap_audit_name).locator("button.audit-name-link").click()
     print(f"   Opened audit: {ap_audit_name}")
 
 def navigate_to_audit(page, config):
-    page.wait_for_selector("a[href='/home/audit']", state="visible")
-    page.click("a[href='/home/audit']")
-    page.wait_for_load_state("networkidle")
-    select_branch(page, config.Branch)
-    click_audit(page, config.ap_audit_name)
+    """The audit's Audit Summary: looked up in Ongoing Audits, else Audit History (a completed audit
+    opens straight to the summary, without the Stock Audit / Audit Summary choice)."""
+    _ui_open_summary(page, config)
 
-    select_navigation_option(page, "Audit Summary")
+
 def A_audit_Summary(page, config):
+    """Audit Summary checks: the UI validation (fields, values and formulas of the data block in
+    the UI VALIDATION section), then the Excel compare. config.summary_ui_validation /
+    config.summary_excel_compare = False skip either one."""
+    ok = True
+    if getattr(config, "summary_ui_validation", True):
+        ok = validate_summary_ui(page, config) and ok
+    if getattr(config, "summary_excel_compare", True):
+        ok = _excel_compare(page, config) and ok
+    return ok
+
+
+def _excel_compare(page, config):
+    """Rows of each filter badge compared with the 'auditSummary' Excel sheet."""
     cfg = Config()
 
     section("LOADING EXCEL DATA")
@@ -677,4 +707,1097 @@ def A_audit_Summary(page, config):
     return engine.summary()
 
 
+# ======================================================================
+# AUDIT SUMMARY — UI VALIDATION (flexible fields and formulas)
+# ======================================================================
+# Everything the checks compare against is DATA in the block below: to add or drop a field,
+# rename a label or change a formula, edit the block — not the code under it.
+#   * Field lists = the user's required fields (2026-11-11).
+#   * Formulas are Python expressions in strings. They may use only min / max / round / abs / sum /
+#     len / round_half_up and the names given in each block's comment.
+#   * Rules come from the spec in audit/skill_audit/ (00-README, 01, 02, 03).
+#   * Status: PASS / FAIL (the page differs from the rule: a new problem) /
+#     KNOWN (a defect the spec already lists, with its finding number; no bug card) / NOT RUN.
 
+UI_SUMMARY = "app-audit-summary"
+
+REQUIRED_FIELDS = OrderedDict([
+    ("Audit Information", ["Audit Name", "Date & Time", "Auditor(s)", "Group", "Audit Type", "Frequency",
+                           "Mapping Type", "Progress", "Status"]),
+    ("Audit Summary Counts", ["All", "Matched Line Item", "Unverified", "Not Found", "Excess Line Item",
+                              "Positive Variance", "Negative Variance", "Location Conflict",
+                              "Cross Checked Audit", "Damaged Report"]),
+    ("Quantity Summary", ["Stock Quantity", "Audited Quantity", "Damaged Quantity"]),
+    ("Audit Report - Table Fields", ["S.No", "Item Code", "Item Name", "Category", "Stock Location",
+                                     "Audited Location", "UOM (Primary)", "Stock Quantity", "Audited Quantity",
+                                     "Variance", "Variance Value", "Variance Type", "Variance History",
+                                     "Damaged Qty", "Auditor", "Audited Date", "Audited Image",
+                                     "Cross Audited Qty", "Cross Damaged Qty", "Declaration Note", "Coordinates",
+                                     "Resolution Status", "Remarks"]),
+    ("Summary Options", ["Item", "Auditor", "Location", "UOM"]),
+    ("Actions", ["Stock Audit", "Auditor Insights", "Archive", "Complete Audit", "Download PDF", "Export",
+                 "Copy Table", "Reopen Audit"]),
+    ("Charts", ["Available Value", "Stock Loss", "Excess Value"]),
+])
+
+# Labels are matched ignoring case, spaces and punctuation ("Un Verified" = "Unverified",
+# "Cross AuditedQty" = "Cross Audited Qty", "Download Pdf" = "Download PDF", "Available  Value" =
+# "Available Value"). Only names that differ in words need an alias.
+LABEL_ALIASES = {
+    "Stock Quantity": ["Stock"],                 # Quantity Summary cards are labelled Stock / Audited / Damaged
+    "Audited Quantity": ["Audited"],
+    "Damaged Quantity": ["Damaged"],
+    "Copy Table": ["Copy table — paste into Excel"],
+}
+SPLIT_TILES = {"Frequency - Mapping Type": ("Frequency", "Mapping Type")}     # one tile, two fields
+STATUS_LABELS = ["Not Started", "Stock Sheet Updated", "In Progress", "In Resolution", "Completed",
+                 "Auto Completed", "Expired"]                                  # spec 01 §5 ("Unknown" = a defect)
+MAPPING_TYPES = ["Random", "ByCategory", "ByStorage", "ByLocation"]
+DATE_FORMATS = {"Date & Time": "%Y-%m-%d %H:%M", "Audited Date": "%m-%d-%y %H:%M"}
+TOLERANCE = 0.05                                                               # money / quantity rounding
+
+# One report row. Names: stock, audited, damaged, price (CostPrice of the item in the export).
+ROW_FORMULAS = OrderedDict([
+    ("Variance", "audited - stock"),                                           # damaged qty not included
+    ("Variance Value", "(audited - stock) * price"),
+    ("Variance Type", "'Positive' if audited > stock else 'Negative' if audited < stock else '-'"),
+])
+
+# Audit Information > Progress (spec 00 / 01 §3). Names: counted_codes (item codes with audited > 0,
+# off-sheet items included), stock_rows (stock-sheet rows = "Total Line Item" of the audit list row),
+# audited_total, damaged_total, stock_total (the Qty cards).
+PROGRESS_FORMULA = ("min(100, (counted_codes / stock_rows * 25 if stock_rows else 0)"
+                    " + ((audited_total + damaged_total) / stock_total * 75 if stock_total else 0))")
+PROGRESS_LABEL = "min(100, round_half_up(progress))"                           # the "n% Completed" text
+
+# Quantity Summary: card = Σ of the first formula over the Item view rows (Qty), Σ of the second (Value).
+CARD_FORMULAS = OrderedDict([
+    ("Stock Quantity", ("stock", "stock * price")),
+    ("Audited Quantity", ("audited", "audited * price")),
+    ("Damaged Quantity", ("damaged", "damaged * price")),
+])
+
+# Count chips (spec 03 §3, count rules). Names: stock, audited, damaged, auditor ('' when none),
+# stock_location, audited_location ('' when blank or '-'), cross_audited.
+CHIP_RULES = OrderedDict([
+    ("All", "True"),
+    ("Matched Line Item", "audited == stock"),
+    ("Unverified", "stock > 0 and audited == 0 and auditor == ''"),
+    ("Not Found", "stock > 0 and audited == 0 and auditor != ''"),
+    ("Excess Line Item", "stock == 0 and audited > 0"),
+    ("Positive Variance", "audited > stock"),
+    ("Negative Variance", "auditor != '' and audited < stock"),
+    ("Location Conflict", "stock_location != audited_location"),
+    ("Cross Checked Audit", "cross_audited > 0"),
+    ("Damaged Report", "damaged > 0"),
+])
+# Chips whose count rule and list rule differ in the spec (03 §3): when the list differs from the count
+# under this condition, the check is KNOWN with the finding. Names: count, listed, resolution (the audit
+# has resolution rows: In Resolution / Completed / Auto Completed).
+CHIP_LIST_DIFFS = {
+    "Matched Line Item": ("03 F9", "resolution and listed < count"),   # resolution rows joined on ItemCode only
+    "Unverified": ("03 F8", "listed > count"),                         # list also takes zero-stock rows
+    "Excess Line Item": ("03 §3", "listed < count"),                   # list takes off-sheet rows only
+}
+
+# Charts (spec 02): per item code, quantities netted across locations. Names: stock, audited, auditor,
+# stock_location, max_cost (highest CostPrice of the item), on_sheet, counted, cost, value, stock_value.
+CHART_ITEM_RULES = OrderedDict([
+    ("counted", "auditor != '' or audited > 0"),          # has a count row; uncounted items are skipped (F2)
+    ("on_sheet", "stock_location != '' or stock > 0"),     # the item has a stock-sheet row
+    ("cost", "max_cost if on_sheet else 0"),               # highest stock-sheet cost; off-sheet = 0 (F5)
+])
+CHART_FORMULAS = OrderedDict([
+    ("Available Value", "min(stock, audited) * cost"),
+    ("Stock Loss", "max(stock - audited, 0) * cost"),
+    ("Excess Value", "max(audited - stock, 0) * cost"),
+])
+STOCK_VALUE_FORMULA = "stock * cost"                       # doughnut denominator: every on-sheet item
+DOUGHNUT_FORMULA = "min(100, round(value / stock_value * 100, 2)) if stock_value > 0 else 0"
+
+# Summary Options: what each Summarize As option must do to the report table (spec 03 §1, §5).
+#   key: columns that identify one row; add / drop: columns compared with the Item view;
+#   stock: "same" = each row shows the item's whole stock, "sum" = the rows add up to it.
+MODE_SPEC = OrderedDict([
+    ("Item", {"key": ["Item Code"], "add": [], "drop": [], "stock": "same"}),
+    ("Auditor", {"key": ["Item Code", "Auditor"], "add": [], "drop": [], "stock": "same"}),
+    ("Location", {"key": ["Item Code", "Stock Location", "Audited Location"], "add": [],
+                  "drop": ["Variance History"], "stock": "sum"}),
+    ("UOM", {"key": ["Item Code"], "add": ["Audited UOM", "Default UOM", "Audited Qty in Default UOM"],
+             "drop": [], "stock": "same"}),
+])
+
+# Actions (spec 01 §1, 03 §8). where: top = header buttons, table = buttons above the table,
+# menu = the ⋮ menu. show / disabled: expressions over status (the Status tile) and rows.
+# check: what is done beyond "shown": open (dialog opened and closed), xlsx / pdf (downloaded and
+# read), clipboard (copied and read). Nothing that changes the audit is ever clicked.
+DONE = "status in ('Completed', 'Auto Completed')"
+ACTION_RULES = OrderedDict([
+    ("Stock Audit", {"where": "top", "show": "True"}),
+    ("Auditor Insights", {"where": "top", "show": "True", "check": "open"}),
+    ("Archive", {"where": "top", "show": "status != 'Archived'"}),
+    ("Complete Audit", {"where": "top", "show": "status != 'Archived'", "disabled": DONE}),
+    ("Download PDF", {"where": "table", "show": DONE, "check": "pdf"}),
+    ("Export", {"where": "table", "show": "rows > 0", "check": "xlsx"}),
+    ("Copy Table", {"where": "table", "show": "rows > 0", "check": "clipboard"}),
+    ("Reopen Audit", {"where": "menu", "show": DONE}),
+])
+# Download PDF: besides "a PDF that names the audit and lists every item", these figures are read from
+# its text and shown in the result for review (the spec does not describe this PDF's sections).
+PDF_FIGURES = OrderedDict([
+    ("Audit Name", r"Audit Name\s*:\s*(\S+)"),
+    ("Verified (counted)", r"VERIFIED \(COUNTED\)\s*([\d.,]+\s*units)"),
+    ("lines counted", r"([\d.,]+)\s*lines counted"),
+    ("Accepted", r"Accepted\s*\((\d+)\)"),
+    ("Investigate", r"Investigate\s*\((\d+)\)"),
+    ("Matched Items", r"Matched Items\s*\((\d+)\)"),
+    ("Not counted (Unverified)", r"NOT COUNTED \(UNVERIFIED\)\s*(\d+)"),
+])
+
+# Spec findings (known defects). KNOWN when the condition holds on this audit, else PASS ("not seen").
+# Names: see _ui_facts().
+KNOWN_FINDINGS = [
+    ("02 F5", "Counted items not on the stock sheet are worth 0 in the charts", "len(off_sheet_counted) > 0"),
+    ("02 F1", "Doughnut is drawn from the % values, which do not add up to 100", "abs(doughnut_sum - 100) > 1"),
+    ("03 F7", "Location Conflict counts Unverified and Excess rows", "conflict_unverified_or_excess > 0"),
+    ("03 F12", "Unverified rows show a negative variance", "unverified_negative > 0"),
+    ("03 F13", "Export has no sheet for the Not Found chip", "export_read and not export_not_found_sheet"),
+    ("03 F26", "Not Found rows show the person who completed the audit as Auditor",
+     "completed and not_found_with_auditor > 0"),
+]
+
+
+# ----------------------------------------------------------------------
+# formula evaluation and small helpers
+# ----------------------------------------------------------------------
+def round_half_up(x):
+    return math.floor(float(x) + 0.5)
+
+
+_SAFE = {"min": min, "max": max, "round": round, "abs": abs, "sum": sum, "len": len,
+         "round_half_up": round_half_up}
+
+
+def _calc(expr, **names):
+    """Evaluate one formula string of the data block."""
+    return eval(expr, {"__builtins__": {}}, {**_SAFE, **names})
+
+
+def _key(text):
+    return re.sub(r"[^a-z0-9]", "", str(text or "").lower())
+
+
+def _txt(text):
+    return " ".join(str(text or "").split())
+
+
+def _blank(v):
+    v = _txt(v)
+    return "" if v in ("", "-", "--") else v
+
+
+def _qn(v):
+    """Number shown on screen ("+3", "1,234.5", "-" -> 0)."""
+    m = re.match(r"^[-+]?\d+(\.\d+)?", _txt(v).replace(",", ""))
+    return float(m.group()) if m else 0.0
+
+
+def _near(a, b, tol=TOLERANCE):
+    return a is not None and b is not None and abs(float(a) - float(b)) <= max(tol, abs(float(b)) * 1e-4)
+
+
+def _find(required, labels):
+    """The label on screen that matches a required name (case, spaces, punctuation ignored; aliases)."""
+    wanted = {_key(required)} | {_key(a) for a in LABEL_ALIASES.get(required, [])}
+    return next((l for l in labels if _key(l) in wanted), None)
+
+
+def _cell(row, required):
+    label = _find(required, list(row.keys()))
+    return row.get(label, "") if label else ""
+
+
+def _row_vals(r, prices=None):
+    """Named values of one report row for the formulas."""
+    code = _txt(_cell(r, "Item Code"))
+    return {"code": code, "stock": _qn(_cell(r, "Stock Quantity")), "audited": _qn(_cell(r, "Audited Quantity")),
+            "damaged": _qn(_cell(r, "Damaged Qty")), "auditor": _blank(_cell(r, "Auditor")),
+            "stock_location": _blank(_cell(r, "Stock Location")),
+            "audited_location": _blank(_cell(r, "Audited Location")),
+            "cross_audited": _qn(_cell(r, "Cross Audited Qty")),
+            "variance": _qn(_cell(r, "Variance")), "variance_value": _qn(_cell(r, "Variance Value")),
+            "variance_type": _blank(_cell(r, "Variance Type")) or "-",
+            "price": (prices or {}).get(code.upper())}
+
+
+def _parse_date(text, fmt):
+    try:
+        return datetime.strptime(_txt(text), fmt)
+    except ValueError:
+        return None
+
+
+# ----------------------------------------------------------------------
+# expected values (pure: rows in, numbers out — tested offline)
+# ----------------------------------------------------------------------
+def _expected_chips(item_rows):
+    vals = [_row_vals(r) for r in item_rows]
+    return OrderedDict((chip, sum(1 for v in vals if _calc(rule, **v))) for chip, rule in CHIP_RULES.items())
+
+
+def _expected_progress(item_rows, stock_rows, cards):
+    counted = len({v["code"].upper() for v in map(_row_vals, item_rows) if v["audited"] > 0})
+    names = {"counted_codes": counted, "stock_rows": stock_rows or 0,
+             "audited_total": cards.get("Audited", 0.0), "damaged_total": cards.get("Damaged", 0.0),
+             "stock_total": cards.get("Stock", 0.0)}
+    progress = _calc(PROGRESS_FORMULA, **names)
+    return progress, _calc(PROGRESS_LABEL, progress=progress), names
+
+
+def _expected_charts(item_rows, prices):
+    """(bar {category: {dataset: value}}, overall {dataset: value}, doughnut {dataset: %}, facts)."""
+    items = OrderedDict()
+    for r in item_rows:                                   # net per item code (spec 02 §0)
+        v = _row_vals(r)
+        e = items.setdefault(v["code"].upper(), {"stock": 0.0, "audited": 0.0, "auditor": "",
+                                                 "stock_location": "", "category": _txt(_cell(r, "Category"))})
+        e["stock"] += v["stock"]
+        e["audited"] += v["audited"]
+        e["auditor"] = e["auditor"] or v["auditor"]
+        e["stock_location"] = e["stock_location"] or v["stock_location"]
+    bar, overall, stock_value, off_sheet = OrderedDict(), dict.fromkeys(CHART_FORMULAS, 0.0), 0.0, []
+    for code, e in items.items():
+        names = dict(e, max_cost=prices.get(code) or 0.0)
+        for k, rule in CHART_ITEM_RULES.items():
+            names[k] = _calc(rule, **names)
+        if names["on_sheet"]:
+            stock_value += _calc(STOCK_VALUE_FORMULA, **names)
+        if not names["counted"]:
+            continue
+        if not names["on_sheet"] and e["audited"] > 0:
+            off_sheet.append(code)
+        cat = bar.setdefault(e["category"] or "-", dict.fromkeys(CHART_FORMULAS, 0.0))
+        for ds, rule in CHART_FORMULAS.items():
+            value = _calc(rule, **names)
+            cat[ds] += value
+            overall[ds] += value
+    pie = OrderedDict((ds, _calc(DOUGHNUT_FORMULA, value=v, stock_value=stock_value)) for ds, v in overall.items())
+    return bar, overall, pie, {"stock_value": stock_value, "off_sheet_counted": off_sheet}
+
+
+# ----------------------------------------------------------------------
+# reading the page (read-only)
+# ----------------------------------------------------------------------
+_UI_ROWS_JS = """(tbody) => [...tbody.querySelectorAll(':scope > tr')].map(tr =>
+    [...tr.querySelectorAll(':scope > td')].map(td => {
+        const t = (td.innerText || '').trim();
+        return !t && td.querySelector('img') ? '[image]' : t; }))"""
+_UI_CHARTS_JS = """() => [...document.querySelectorAll('app-audit-summary p-chart')].map(pc => {
+    const card = pc.closest('.cardDetail'); let cmp = null;
+    try { cmp = window.ng ? window.ng.getComponent(pc) : null; } catch (e) {}
+    return {card: card ? card.className : '', data: cmp && cmp.data ? JSON.parse(JSON.stringify(cmp.data)) : null};
+})"""
+_UI_LOADED_JS = """() => {
+    const status = document.querySelector('app-audit-summary div.status-pill');
+    const all = document.querySelector('app-audit-summary span.badge-custom');
+    return status && status.innerText.trim() !== 'Unknown' && all && !/\\(0\\)\\s*$/.test(all.innerText.trim());
+}"""
+_UI_SUMMARIZE = f"{UI_SUMMARY} h6:has-text('Summarize As') ~ p-dropdown"
+_UI_PANEL_LI = ".p-dropdown-panel:visible li.p-dropdown-item"
+
+
+def _ui_settle(page, ms=1200):
+    wait_spinner(page)
+    page.wait_for_timeout(ms)
+
+
+def _ui_close_guide(page):
+    """The "Audit progress" guide panel that slides in on some screens."""
+    close = page.locator("app-audit-guide-panel button.agp-close")
+    if close.count() and close.evaluate(
+            "e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.left < innerWidth && r.right > 0 }"):
+        close.click()
+        page.wait_for_timeout(500)
+
+
+def _ui_open_summary(page, config):
+    """Audits -> branch -> the audit in Ongoing Audits, else Audit History -> Audit Summary.
+    The Stock Audit / Audit Summary choice only shows for open audits. Returns (list tab, list row)."""
+    name = config.ap_audit_name
+    page.wait_for_selector("a[href='/home/audit']", state="visible")
+    page.click("a[href='/home/audit']")
+    try:
+        page.wait_for_load_state("networkidle", timeout=10000)     # the list keeps polling at times
+    except Exception:
+        pass
+    select_branch(page, config.Branch)
+    wait_spinner(page)
+    found = None
+    for tab in ("Ongoing Audits", "Audit History"):
+        t = page.get_by_role("tab", name=tab, exact=True)
+        if t.count():
+            t.first.click()
+            _ui_settle(page, 2500)
+        try:
+            page.wait_for_selector("button.audit-name-link", timeout=30000)
+        except Exception:
+            continue
+        page.wait_for_timeout(1000)
+        row = audit_row(page, name)
+        if row.count():
+            found = (tab, row)
+            break
+    if not found:
+        raise RuntimeError(f"audit {name} is in neither Ongoing Audits nor Audit History")
+    tab, row = found
+    heads = [_txt(h) for h in row.locator("xpath=ancestor::table[1]/thead//th").all_inner_texts()]
+    info = OrderedDict(zip(heads, [_txt(x) for x in row.locator("td").all_inner_texts()]))
+    row.locator("button.audit-name-link").click()
+    print(f"   Opened audit: {name} ({tab})")
+    nav = page.locator("div[role='dialog'][aria-labelledby='auditNavTitle']")
+    try:
+        nav.first.wait_for(state="visible", timeout=6000)
+        select_navigation_option(page, "Audit Summary")
+    except Exception:
+        page.wait_for_url("**/auditSummary", timeout=30000)
+        try:
+            page.wait_for_function(_UI_LOADED_JS, timeout=30000)
+        except Exception:
+            pass
+    _ui_settle(page, 1500)
+    _ui_close_guide(page)
+    return tab, info
+
+
+def _ui_headers(page):
+    return [_txt(h) for h in page.locator(f"{UI_SUMMARY} thead th").all_inner_texts()]
+
+
+def _ui_page_rows(page):
+    heads = _ui_headers(page)
+    body = page.locator(f"{UI_SUMMARY} tbody.p-datatable-tbody").first
+    if not body.count():
+        return []
+    return [OrderedDict(zip(heads, cells)) for cells in body.evaluate(_UI_ROWS_JS) if len(cells) == len(heads)]
+
+
+def _ui_chips(page):
+    out = OrderedDict()
+    for t in page.locator(f"{UI_SUMMARY} span.badge-custom").all_inner_texts():
+        m = re.match(r"^(.*?)\s*\((\d+)\)$", _txt(t))
+        if m:
+            out[m.group(1)] = int(m.group(2))
+    return out
+
+
+def _ui_active_count(page):
+    a = page.locator(f"{UI_SUMMARY} span.badge-custom.active-badge").first
+    m = re.search(r"\((\d+)\)\s*$", _txt(a.inner_text())) if a.count() else None
+    return int(m.group(1)) if m else None
+
+
+def _ui_wait_rows(page, timeout_ms=10000):
+    """Wait until the table has finished refreshing: rows and chips read the same twice in a row, and an
+    empty table only when the selected chip is 0 (a refresh empties the table before the chips update)."""
+    _ui_settle(page, 600)
+    prev = None
+    for _ in range(max(1, timeout_ms // 400)):
+        rows = _ui_page_rows(page)
+        snap = ([tuple(r.values())[:3] for r in rows], tuple(_ui_chips(page).items()))
+        ready = bool(rows) or _ui_active_count(page) == 0
+        if ready and snap == prev:
+            return True
+        prev = snap if ready else None
+        page.wait_for_timeout(400)
+    return False
+
+
+def _ui_pager(page, which):
+    return page.locator(f"{UI_SUMMARY} .p-paginator button.p-paginator-{which}").first
+
+
+def _ui_enabled(btn):
+    return btn.count() > 0 and btn.is_enabled() and "p-disabled" not in (btn.get_attribute("class") or "")
+
+
+def _ui_all_rows(page, limit=200):
+    """Every row on every page (repeated item codes kept, unlike collect_all); back on page 1."""
+    if _ui_enabled(_ui_pager(page, "first")):
+        _ui_pager(page, "first").click()
+        _ui_wait_rows(page)
+    rows, pages = _ui_page_rows(page), 1
+    while pages < limit and _ui_enabled(_ui_pager(page, "next")):
+        _ui_pager(page, "next").click()
+        _ui_wait_rows(page)
+        rows += _ui_page_rows(page)
+        pages += 1
+    if pages > 1 and _ui_enabled(_ui_pager(page, "first")):
+        _ui_pager(page, "first").click()
+        _ui_wait_rows(page)
+    return rows
+
+
+def _ui_reopen(page, st):
+    """Open the summary again (Item view, All chip): used when the report table stopped loading."""
+    _ui_open_summary(page, st["config"])
+    _ui_summarize(page, "Item")
+    _ui_chip(page, "All")
+
+
+def _ui_rows_retry(page, st, apply, rows_expected):
+    """apply() (select a chip or a Summarize As option), then read every row. When the table stays empty
+    although rows are expected, reopen the summary, apply() again and read once more. Returns (rows, note)."""
+    apply()
+    rows = _ui_all_rows(page)
+    if rows or not rows_expected:
+        return rows, ""
+    _ui_reopen(page, st)
+    apply()
+    return _ui_all_rows(page), " — the table stayed empty on the first try; read again after reopening the page"
+
+
+def _ui_tiles(page):
+    tiles = OrderedDict()
+    for t in page.locator(f"{UI_SUMMARY} div.audit-info-tile .tile-row").all():
+        label = _txt(t.locator(".tile-label").first.inner_text())
+        val, pill, prog = t.locator(".tile-value").first, t.locator(".status-pill").first, t.locator(".progress-value").first
+        if val.count():
+            tiles[label] = _txt(val.get_attribute("title") or val.inner_text())    # title = untruncated
+        elif pill.count():
+            tiles[label] = _txt(pill.inner_text())
+        elif prog.count():
+            tiles[label] = _txt(prog.inner_text())
+        else:
+            tiles[label] = _txt(t.inner_text())[len(label):].strip()
+    for joined, parts in SPLIT_TILES.items():
+        label = _find(joined, list(tiles))
+        if label:
+            bits = [b.strip() for b in tiles[label].split(" - ", len(parts) - 1)]
+            tiles.update(zip(parts, bits + [""] * (len(parts) - len(bits))))
+    return tiles
+
+
+def _ui_cards(page, mode):
+    """{Stock, Audited, Damaged} from the Qty or Value cards (the toggle is put back to Qty after Value)."""
+    btn = page.locator(f"{UI_SUMMARY} div.summary-toggle button.toggle-btn", has_text=mode).first
+    if "active" not in (btn.get_attribute("class") or ""):
+        btn.click()
+        _ui_settle(page, 1200)
+    out = OrderedDict()
+    for m in page.locator(f"{UI_SUMMARY} div.summary-metric").all():
+        out[_txt(m.locator(".metric-label").inner_text())] = _qn(m.locator(".metric-value").inner_text())
+    if mode != "Qty":
+        _ui_cards(page, "Qty")
+    return out
+
+
+def _ui_options(page):
+    page.locator(_UI_SUMMARIZE).first.click()
+    page.wait_for_timeout(600)
+    opts = [_txt(t) for t in page.locator(_UI_PANEL_LI).all_inner_texts()]
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(300)
+    return opts
+
+
+def _ui_summarize(page, option, tries=3):
+    dd = page.locator(_UI_SUMMARIZE).first
+    item = page.locator(_UI_PANEL_LI, has_text=re.compile(rf"^\s*{re.escape(option)}\s*$")).first
+    for _ in range(tries):
+        if _txt(dd.locator(".p-dropdown-label").inner_text()) == option:
+            return
+        _ui_settle(page, 500)
+        try:
+            dd.click(timeout=8000)
+            item.wait_for(state="visible", timeout=5000)
+            item.click(timeout=5000)
+            _ui_wait_rows(page)
+        except Exception:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(1000)
+    if _txt(dd.locator(".p-dropdown-label").inner_text()) != option:
+        raise RuntimeError(f"Summarize As did not switch to {option!r}")
+
+
+def _ui_chip(page, chip):
+    label = _find(chip, list(_ui_chips(page)))
+    if label is None:
+        raise RuntimeError(f"no chip {chip!r}")
+    click_badge(page, Config(), label)
+    _ui_wait_rows(page)
+
+
+def _ui_charts(page):
+    out = {}
+    for ch in page.evaluate(_UI_CHARTS_JS):
+        kind = "bar" if "barChart" in ch["card"] else "pie" if "pieChart" in ch["card"] else None
+        if kind and ch["data"]:
+            out[kind] = ch["data"]
+    return out
+
+
+def _ui_export(page, folder):
+    """Download Export; {sheet: rows under its ItemCode header row} and the file path."""
+    with page.expect_download(timeout=60000) as info:
+        page.locator(f"{UI_SUMMARY} button.warning-button", has_text="Export").first.click()
+    path = os.path.join(folder, info.value.suggested_filename or "Audit Summary Report.xlsx")
+    info.value.save_as(path)
+    sheets = OrderedDict()
+    for name, raw in pd.read_excel(path, header=None, dtype=str, sheet_name=None).items():
+        raw = raw.fillna("")
+        for i in range(min(15, len(raw))):
+            cells = [_txt(x) for x in raw.iloc[i]]
+            if "itemcode" in [_key(x) for x in cells]:
+                df = raw.iloc[i + 1:].copy()
+                df.columns = [c_ if c_ and c_ not in cells[:j] else f"{c_}#{j}" for j, c_ in enumerate(cells)]
+                code = next(col for col in df.columns if _key(col) == "itemcode")
+                sheets[name] = df[df[code].map(_txt) != ""]
+                break
+        else:
+            sheets[name] = pd.DataFrame()
+    return path, sheets
+
+
+def _ui_prices(sheets):
+    """{ITEM CODE: CostPrice} from the export (the report's price; the highest when an item repeats)."""
+    df = sheets.get("All")
+    if df is None or df.empty:
+        df = next((d for d in sheets.values() if d is not None and not d.empty), pd.DataFrame())
+    code = next((c_ for c_ in df.columns if _key(c_) == "itemcode"), None)
+    cost = next((c_ for c_ in df.columns if _key(c_) == "costprice"), None)
+    prices = {}
+    if code and cost:
+        for _, r in df.iterrows():
+            k, v = _txt(r[code]).upper(), _qn(r[cost])
+            prices[k] = max(prices.get(k, v), v)
+    return prices
+
+
+def _ui_pdf_cmap(streams):
+    """Glyph code -> text from every ToUnicode map in the PDF (fonts with Identity-H encoding)."""
+    cmap = {}
+    for raw in streams:
+        if b"beginbfchar" not in raw and b"beginbfrange" not in raw:
+            continue
+        for body in re.findall(rb"beginbfchar(.*?)endbfchar", raw, re.S):
+            for src, dst in re.findall(rb"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>", body):
+                cmap[int(src, 16)] = bytes.fromhex(dst.decode()).decode("utf-16-be", "ignore")
+        for body in re.findall(rb"beginbfrange(.*?)endbfrange", raw, re.S):
+            for lo, hi, dst in re.findall(rb"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(<[0-9A-Fa-f]+>|\[[^\]]*\])", body):
+                lo, hi = int(lo, 16), int(hi, 16)
+                if dst.startswith(b"["):
+                    for i, d in enumerate(re.findall(rb"<([0-9A-Fa-f]+)>", dst)):
+                        cmap[lo + i] = bytes.fromhex(d.decode()).decode("utf-16-be", "ignore")
+                else:
+                    start = int(dst[1:-1], 16)
+                    for i in range(hi - lo + 1):
+                        cmap[lo + i] = chr(start + i)
+    return cmap
+
+
+def _ui_pdf_text(data):
+    """Text of a PDF without a PDF library: inflate each stream, then join the strings of each text block.
+    Literal strings (...) are read as they are; hex strings <...> through the ToUnicode maps."""
+    streams = []
+    for m in re.finditer(rb"stream\r?\n(.*?)endstream", data, re.S):
+        raw = m.group(1).rstrip(b"\r\n")
+        try:
+            raw = zlib.decompress(raw)
+        except Exception:
+            pass
+        streams.append(raw)
+    cmap = _ui_pdf_cmap(streams)
+    out = []
+    for raw in streams:
+        for block in re.findall(rb"BT(.*?)ET", raw, re.S):
+            parts = []
+            for lit, hexs in re.findall(rb"\(((?:\\.|[^\\)])*)\)|<([0-9A-Fa-f]+)>", block):
+                if lit:
+                    parts.append(lit.decode("latin-1", "ignore"))
+                elif hexs:
+                    codes = [int(hexs[i:i + 4], 16) for i in range(0, len(hexs) - 3, 4)]
+                    parts.append("".join(cmap.get(x, "") for x in codes))
+            out.append("".join(parts))
+    return "\n".join(out)
+
+
+def _ui_buttons(page):
+    """{label: locator} of the header buttons, the buttons above the table and the ⋮ menu items."""
+    pools = {"top": OrderedDict(), "table": OrderedDict(), "menu": OrderedDict()}
+    for where, sel in (("top", f"{UI_SUMMARY} .audit-actions-buttons button"), ("table", f"{UI_SUMMARY} .card-header button")):
+        for b in page.locator(sel).all():
+            label = _txt(b.inner_text()) or _txt(b.get_attribute("title") or b.get_attribute("aria-label"))
+            if label and b.is_visible():
+                pools[where][label] = b
+    dots = page.locator(f"{UI_SUMMARY} button.dots-btn").first
+    if dots.count() and dots.is_visible():
+        dots.click()
+        page.wait_for_timeout(800)
+        for b in page.locator(f"{UI_SUMMARY} .dropdown-container").first.locator("button, a, li").all():
+            label = _txt(b.inner_text())
+            if label and label not in pools["menu"] and b.is_visible():
+                pools["menu"][label] = b
+        _ui_close_menu(page)
+    return pools
+
+
+def _ui_close_menu(page):
+    page.keyboard.press("Escape")
+    title = page.locator(f"{UI_SUMMARY} .audit-details-title").first
+    if title.count():
+        title.click()
+    page.wait_for_timeout(400)
+
+
+# ----------------------------------------------------------------------
+# results and report
+# ----------------------------------------------------------------------
+class _UIChecks:
+    def __init__(self, page, folder):
+        self.page, self.folder, self.rows = page, folder, []
+
+    def add(self, group, check, ok, expected, actual, status=None, finding=""):
+        status = status or ("PASS" if ok else "FAIL")
+        shot = ""
+        if status == "FAIL" and sum(r["Status"] == "FAIL" for r in self.rows) < 40:
+            shot = os.path.join(self.folder, f"FAIL_{len(self.rows) + 1:03d}_{_key(check)[:30]}.png")
+            try:
+                self.page.screenshot(path=shot, full_page=True)
+            except Exception:
+                shot = ""
+        self.rows.append(OrderedDict([("Group", group), ("Check", check), ("Expected", _txt(expected)),
+                                      ("Actual", _txt(actual)), ("Status", status), ("Finding", finding),
+                                      ("Screenshot", shot)]))
+        col = {"PASS": G, "FAIL": R, "KNOWN": Y}.get(status, DIM)
+        print(f"  {c(f'{status:<8}', col)} {group} | {check} | {_txt(actual)[:160]}")
+
+    def error(self, group, step, e):
+        self.add(group, step, False, "runs without an error", f"error: {str(e).splitlines()[0][:200]}")
+
+    def not_run(self, group, check, why):
+        self.add(group, check, None, "-", why, status="NOT RUN")
+
+
+def _ui_write_report(checks, folder, config):
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    fills = {"PASS": "C6EFCE", "FAIL": "FFC7CE", "KNOWN": "FCE4D6", "NOT RUN": "D9D9D9"}
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Checks"
+    ws.append(list(checks.rows[0].keys()))
+    for r in checks.rows:
+        ws.append(list(r.values()))
+        ws.cell(ws.max_row, 5).fill = PatternFill("solid", fgColor=fills.get(r["Status"], "FFFFFF"))
+    bugs = wb.create_sheet("Bugs")
+    bugs.append(["Bug ID", "Module", "Sub Module", "Bug Title", "Environment", "Severity", "Priority",
+                 "Preconditions", "Steps to Reproduce", "Expected Result", "Actual Result", "Reproducibility",
+                 "Status", "Attachments"])
+    for n, r in enumerate([r for r in checks.rows if r["Status"] == "FAIL"], 1):
+        bugs.append([f"SA-SUM-{n:03d}", "Stock Audit", f"Audit Summary — {r['Group']}", r["Check"],
+                     getattr(config, "environments", "QA"), "Major", "Medium",
+                     f"1. User is logged in as the audit owner.\n2. Audit {config.ap_audit_name} exists.",
+                     f"1. Audits > open {config.ap_audit_name} > Audit Summary.\n2. Check: {r['Group']} > {r['Check']}.",
+                     r["Expected"], r["Actual"], "Always", "New", r["Screenshot"]])
+    for sheet in (ws, bugs):
+        for cell in sheet[1]:
+            cell.font = Font(bold=True)
+        for col in sheet.columns:
+            sheet.column_dimensions[col[0].column_letter].width = min(max(10, max(len(str(x.value or "")) for x in col) + 2), 70)
+            for x in col:
+                x.alignment = Alignment(wrap_text=True, vertical="top")
+    path = os.path.join(folder, "Summary_UI_Validation.xlsx")
+    wb.save(path)
+    return path
+
+
+# ----------------------------------------------------------------------
+# the checks, one function per required-field group
+# ----------------------------------------------------------------------
+def _check_information(ck, st):
+    group, tiles, row = "Audit Information", st["tiles"], st["list_row"]
+    for field in REQUIRED_FIELDS[group]:
+        label = _find(field, list(tiles))
+        ck.add(group, f"{field} shown with a value", bool(label and tiles[label]), "shown, not empty",
+               f"{label}: {tiles[label]!r}" if label else "MISSING")
+    get = lambda f: tiles.get(_find(f, list(tiles)) or "", "")
+    ck.add(group, "Audit Name = the audit opened", get("Audit Name") == st["audit"], st["audit"], get("Audit Name"))
+    list_type = next((v for k, v in row.items() if _key(k) == "type"), None)
+    list_status = next((v for k, v in row.items() if _key(k) == "status"), None)
+    ck.add(group, "Audit Type = audit list Type", _key(get("Audit Type")) == _key(list_type), list_type, get("Audit Type"))
+    ck.add(group, "Status = audit list Status", _key(get("Status")) == _key(list_status), list_status, get("Status"))
+    ck.add(group, "Status is a known label", get("Status") in STATUS_LABELS, " / ".join(STATUS_LABELS), get("Status"))
+    ck.add(group, "Mapping Type is a known type", get("Mapping Type") in MAPPING_TYPES, " / ".join(MAPPING_TYPES),
+           get("Mapping Type"))
+    when = _parse_date(get("Date & Time"), DATE_FORMATS["Date & Time"])
+    created = next((v for k, v in row.items() if "created" in _key(k)), "")
+    made = next((d for d in (_parse_date(created, f) for f in ("%d-%m-%Y", "%m-%d-%Y", "%Y-%m-%d")) if d), None)
+    ck.add(group, f"Date & Time is {DATE_FORMATS['Date & Time']} and the audit's creation date",
+           bool(when) and (made is None or abs((when.date() - made.date()).days) <= 1),
+           f"format {DATE_FORMATS['Date & Time']}, date ≈ list Created Date {created}", get("Date & Time"))
+    # Progress
+    total = next((v for k, v in row.items() if "totallineitem" in _key(k)), "")
+    m = re.search(r"/\s*(\d+)", total)
+    stock_rows = int(m.group(1)) if m else len({_row_vals(r)["code"] for r in st["rows"] if _row_vals(r)["stock_location"]})
+    progress, label, names = _expected_progress(st["rows"], stock_rows, st["qty"])
+    shown = re.search(r"(\d+(?:\.\d+)?)\s*%", get("Progress"))
+    bar = st.get("progress_bar")
+    ok = bool(shown) and float(shown.group(1)) == label and (bar is None or _near(bar, progress, 0.01))
+    ck.add(group, "Progress = formula", ok, f"{progress:.2f} -> label {label}% ({PROGRESS_FORMULA}; {names})",
+           f"label {get('Progress')!r}, bar {bar}")
+
+
+def _check_counts(ck, st, page):
+    group, chips = "Audit Summary Counts", st["chips"]
+    expected = _expected_chips(st["rows"])
+    for field in REQUIRED_FIELDS[group]:
+        label = _find(field, list(chips))
+        if label is None:
+            ck.add(group, f"{field} chip shown", False, "shown", "MISSING")
+            continue
+        want = expected.get(field)
+        ck.add(group, f"{field} count = rows meeting its rule", want is None or chips[label] == want,
+               f"{want} ({CHIP_RULES.get(field, '-')})", chips[label])
+    for field in REQUIRED_FIELDS[group]:                  # each chip lists as many rows as it counts
+        label = _find(field, list(chips))
+        if label is None:
+            continue
+        try:
+            listed, note = _ui_rows_retry(page, st, lambda: _ui_chip(page, label), chips[label] > 0)
+            actual = f"{len(listed)} row(s): {[_row_vals(r)['code'] for r in listed][:15]}{note}"
+            known = CHIP_LIST_DIFFS.get(field)
+            names = {"count": chips[label], "listed": len(listed),
+                     "resolution": st["status"] in ("In Resolution", "Completed", "Auto Completed")}
+            if len(listed) != chips[label] and known and _calc(known[1], **names):
+                ck.add(group, f"{field} lists {chips[label]} row(s)", False, chips[label],
+                       f"{actual} (spec {known[0]}: count and list rules differ)", status="KNOWN",
+                       finding=f"spec {known[0]}")
+                continue
+            ck.add(group, f"{field} lists {chips[label]} row(s)", len(listed) == chips[label], chips[label], actual)
+        except Exception as e:
+            ck.error(group, f"{field} chip list", e)
+    _ui_chip(page, _find("All", list(chips)))
+
+
+def _check_quantities(ck, st):
+    group, prices = "Quantity Summary", st["prices"]
+    vals = [_row_vals(r, prices) for r in st["rows"]]
+    for field, (qty_rule, value_rule) in CARD_FORMULAS.items():
+        label = _find(field, list(st["qty"]))
+        if label is None:
+            ck.add(group, f"{field} card shown", False, "shown", f"MISSING (cards {list(st['qty'])})")
+            continue
+        want = sum(_calc(qty_rule, **v) for v in vals)
+        ck.add(group, f"{field} (Qty) = Σ {qty_rule}", _near(st["qty"][label], want), want, st["qty"][label])
+        priced = [v for v in vals if v["price"] is not None]
+        if len(priced) < len(vals):
+            ck.not_run(group, f"{field} (Value)", f"no price for {len(vals) - len(priced)} row(s) (export not read)")
+            continue
+        want = sum(_calc(value_rule, **v) for v in vals)
+        got = st["value"].get(_find(field, list(st["value"])) or "")
+        ck.add(group, f"{field} (Value) = Σ {value_rule}", _near(got, want), round(want, 2), got)
+
+
+def _check_table(ck, st):
+    group, heads = "Audit Report - Table Fields", st["headers"]
+    missing = [f for f in REQUIRED_FIELDS[group] if _find(f, heads) is None]
+    ck.add(group, "All table fields shown", not missing, ", ".join(REQUIRED_FIELDS[group]),
+           f"missing={missing}; order on screen: {heads}")
+    for field, rule in ROW_FORMULAS.items():
+        bad, checked = [], 0
+        for r in st["rows"]:
+            v = _row_vals(r, st["prices"])
+            if "price" in rule and v["price"] is None:
+                continue
+            checked += 1
+            want = _calc(rule, **v)
+            got = {"Variance": v["variance"], "Variance Value": v["variance_value"],
+                   "Variance Type": v["variance_type"]}.get(field)
+            if not (got == want if isinstance(want, str) else _near(got, want)):
+                bad.append(f"{v['code']}: {got} vs {want}")
+        if not checked:
+            ck.not_run(group, f"{field} = {rule}", "no price (export not read)")
+        else:
+            ck.add(group, f"{field} = {rule}", not bad, f"{checked} row(s) match", "; ".join(bad[:8]) or f"{checked} row(s) match")
+    fmt = DATE_FORMATS["Audited Date"]
+    bad = [f"{_row_vals(r)['code']}: {_cell(r, 'Audited Date')!r}" for r in st["rows"]
+           if _blank(_cell(r, "Audited Date")) and not _parse_date(_cell(r, "Audited Date"), fmt)]
+    ck.add(group, f"Audited Date format {fmt}", not bad, fmt, "; ".join(bad[:8]) or "all dates match")
+
+
+def _check_options(ck, st, page):
+    group = "Summary Options"
+    offered = st["options"]
+    missing = [o for o in REQUIRED_FIELDS[group] if _find(o, offered) is None]
+    ck.add(group, "Summarize As offers every option", not missing, ", ".join(REQUIRED_FIELDS[group]),
+           f"offered={offered}; missing={missing}")
+    base_heads = st["headers"]
+    item_view = defaultdict(lambda: {"stock": 0.0, "audited": 0.0, "damaged": 0.0})
+    for r in st["rows"]:
+        v = _row_vals(r)
+        for k in ("stock", "audited", "damaged"):
+            item_view[v["code"].upper()][k] += v[k]
+    try:
+        for option in REQUIRED_FIELDS[group]:
+            label = _find(option, offered)
+            spec = MODE_SPEC.get(option)
+            if label is None or spec is None:
+                continue
+            rows, note = _ui_rows_retry(page, st, lambda: _ui_summarize(page, label), st["chips"].get("All", 0) > 0)
+            heads = _ui_headers(page)
+            want = [h for h in base_heads if _find(h, spec["drop"]) is None] + spec["add"]
+            lost = [h for h in want if _find(h, heads) is None]
+            extra = [h for h in heads if _find(h, want) is None]
+            ck.add(group, f"{option}: table columns update", not lost and not extra,
+                   f"Item view columns{' + ' + str(spec['add']) if spec['add'] else ''}"
+                   f"{' − ' + str(spec['drop']) if spec['drop'] else ''}", f"missing={lost} extra={extra}")
+            keys = [tuple(_txt(_cell(r, k)) for k in spec["key"]) for r in rows]
+            dup = sorted({k for k in keys if keys.count(k) > 1})
+            ck.add(group, f"{option}: one row per {' × '.join(spec['key'])}", not dup and bool(rows),
+                   "unique rows", f"{len(rows)} row(s); repeated={dup[:5]}{note}")
+            per = defaultdict(lambda: {"stock": [], "audited": 0.0, "damaged": 0.0})
+            unit_rows = rows
+            if option == "UOM":                              # compare only rows counted in the primary unit
+                unit_rows = [r for r in rows if _key(_cell(r, "Audited UOM")) in ("", _key(_cell(r, "UOM (Primary)")))]
+            for r in unit_rows:
+                v = _row_vals(r)
+                p = per[v["code"].upper()]
+                p["stock"].append(v["stock"])
+                p["audited"] += v["audited"]
+                p["damaged"] += v["damaged"]
+            bad = []
+            for code, p in per.items():
+                iv = item_view.get(code)
+                if iv is None:
+                    bad.append(f"{code}: not in the Item view")
+                    continue
+                stock_ok = (_near(sum(p["stock"]), iv["stock"]) if spec["stock"] == "sum"
+                            else all(_near(s, iv["stock"]) for s in p["stock"]))
+                if not (stock_ok and _near(p["audited"], iv["audited"]) and _near(p["damaged"], iv["damaged"])):
+                    bad.append(f"{code}: stock {p['stock']} audited {p['audited']:g} damaged {p['damaged']:g} "
+                               f"vs Item view {iv['stock']:g}/{iv['audited']:g}/{iv['damaged']:g}")
+            ck.add(group, f"{option}: rows add up to the Item view per item", not bad,
+                   f"stock {spec['stock']}, audited and damaged summed", "; ".join(bad[:6]) or f"{len(per)} item(s) match")
+            bad = []
+            for r in unit_rows:
+                v = _row_vals(r, st["prices"])
+                if not _near(v["variance"], _calc(ROW_FORMULAS["Variance"], **v)):
+                    bad.append(f"{v['code']}: {v['variance']:g}")
+            ck.add(group, f"{option}: Variance = {ROW_FORMULAS['Variance']} on every row", not bad,
+                   "every row", "; ".join(bad[:6]) or f"{len(unit_rows)} row(s) match")
+    except Exception as e:
+        ck.error(group, "Summarize As options", e)
+    finally:
+        try:
+            _ui_summarize(page, _find("Item", offered) or "Item")
+        except Exception as e:
+            ck.error(group, "back to Item", e)
+
+
+def _check_actions(ck, st, page):
+    group = "Actions"
+    if not _ui_page_rows(page) and st["chips"].get("All", 0) > 0:     # the table stopped loading
+        _ui_reopen(page, st)
+    pools = _ui_buttons(page)
+    facts = {"status": st["status"], "rows": len(st["rows"])}
+    for field in REQUIRED_FIELDS[group]:
+        rule = ACTION_RULES[field]
+        pool = pools[rule["where"]]
+        label = _find(field, list(pool))
+        want = bool(_calc(rule["show"], **facts))
+        ck.add(group, f"{field} {'shown' if want else 'hidden'} ({rule['where']}, status {st['status']})",
+               (label is not None) == want, "shown" if want else "hidden", "shown" if label else "hidden")
+        if label and rule.get("disabled"):
+            want_off = bool(_calc(rule["disabled"], **facts))
+            off = pool[label].is_disabled()
+            ck.add(group, f"{field} {'disabled' if want_off else 'enabled'} (status {st['status']})", off == want_off,
+                   "disabled" if want_off else "enabled", "disabled" if off else "enabled")
+        if not label:
+            continue
+        try:
+            how = rule.get("check")
+            if how == "open":
+                pool[label].click()
+                dlg = page.locator("div.auditor-summary-dialog").first
+                dlg.wait_for(state="visible", timeout=15000)
+                heads = [_txt(h) for h in dlg.locator("thead th").all_inner_texts()]
+                dlg.locator("button.close-btn").first.click()
+                dlg.wait_for(state="hidden", timeout=5000)
+                ck.add(group, f"{field} opens and closes", bool(heads), "dialog with columns", f"columns={heads}")
+            elif how == "xlsx":
+                ok = bool(st["export_path"]) and os.path.getsize(st["export_path"]) > 0
+                ck.add(group, f"{field} downloads the report", ok, "a non-empty .xlsx",
+                       f"{os.path.basename(st['export_path'] or '-')}; sheets={list(st['sheets'])}")
+            elif how == "pdf":
+                _check_pdf(ck, st, page, label, pools)
+            elif how == "clipboard":
+                _check_clipboard(ck, st, page, pool[label])
+        except Exception as e:
+            ck.error(group, f"{field} check", e)
+            _ui_close_menu(page)
+
+
+def _check_pdf(ck, st, page, label, pools):
+    group, codes = "Actions", sorted({_row_vals(r)["code"] for r in st["rows"]})
+    sources = [("table button", lambda: pools["table"][label].click())]
+    menu_label = _find("Download PDF", list(pools["menu"]))
+    if menu_label:
+        def from_menu():
+            page.locator(f"{UI_SUMMARY} button.dots-btn").first.click()
+            page.wait_for_timeout(800)
+            page.locator(f"{UI_SUMMARY} .dropdown-container").first.locator(
+                "button, a, li", has_text=re.compile(rf"^\s*{re.escape(menu_label)}\s*$")).first.click()
+        sources.append(("⋮ menu", from_menu))
+    for where, click in sources:
+        with page.expect_download(timeout=90000) as info:
+            click()
+        path = os.path.join(ck.folder, f"Audit_Summary_{_key(where)}.pdf")
+        info.value.save_as(path)
+        data = open(path, "rb").read()
+        text = _ui_pdf_text(data)
+        found = [x for x in codes if x in text]
+        is_pdf = data[:5] == b"%PDF-"
+        if is_pdf and not text.strip():
+            ck.add(group, f"Download PDF ({where}) is a PDF", True, "a PDF", f"{len(data)} bytes")
+            ck.not_run(group, f"Download PDF ({where}) lists every item", "PDF text is not readable without a PDF library")
+            continue
+        figures = {k: (m.group(1) if (m := re.search(rx, text)) else "-") for k, rx in PDF_FIGURES.items()}
+        named = st["audit"] in text
+        ck.add(group, f"Download PDF ({where}) is a PDF that names the audit and lists every item",
+               is_pdf and named and len(found) == len(codes),
+               f"a PDF naming {st['audit']} with {len(codes)} item code(s)",
+               f"{len(data)} bytes; audit named={named}; items found {len(found)}/{len(codes)}; "
+               f"missing={[x for x in codes if x not in found][:10]}; PDF figures {figures}")
+        _ui_close_menu(page)
+
+
+def _check_clipboard(ck, st, page, button):
+    group = "Actions"
+    origin = re.match(r"^https?://[^/]+", page.url).group(0)
+    page.context.grant_permissions(["clipboard-read", "clipboard-write"], origin=origin)
+    button.click()
+    page.wait_for_timeout(1200)
+    text = page.evaluate("() => navigator.clipboard.readText()")
+    lines = [l for l in text.splitlines() if l.strip()]
+    shown = _ui_page_rows(page)
+    codes = [_row_vals(r)["code"] for r in shown]
+    pasted = [l.split("\t") for l in lines[1:]]
+    found = [x for x in codes if any(x in cells for cells in pasted)]
+    head = lines[0].split("\t") if lines else []
+    lost = [h for h in REQUIRED_FIELDS["Audit Report - Table Fields"] if h != "S.No" and _find(h, head) is None]
+    ck.add(group, "Copy Table copies the header and every row shown", bool(lines) and not lost and len(found) == len(codes),
+           f"header with the table fields + {len(codes)} row(s)",
+           f"{len(lines)} line(s); rows found {len(found)}/{len(codes)}; header missing={lost}")
+
+
+def _check_charts(ck, st):
+    group, charts = "Charts", st["charts"]
+    bar_data, pie_data = charts.get("bar") or {}, charts.get("pie") or {}
+    shown = OrderedDict((_txt(ds.get("label")), ds.get("data") or []) for ds in bar_data.get("datasets", []))
+    cats = [_txt(x) for x in bar_data.get("labels", [])]
+    for field in REQUIRED_FIELDS[group]:
+        ck.add(group, f"{field} series shown", _find(field, list(shown)) is not None, "shown", f"series={list(shown)}")
+    if not st["prices"]:
+        ck.not_run(group, "Chart values", "no cost price (export not read)")
+        return
+    bar, overall, pie, facts = _expected_charts(st["rows"], st["prices"])
+    st["chart_facts"] = facts
+    for field, rule in CHART_FORMULAS.items():
+        label = _find(field, list(shown))
+        if label is None:
+            continue
+        got = {cat: float(v or 0) for cat, v in zip(cats, shown[label])}
+        want = {cat: vals[field] for cat, vals in bar.items() if cat != "-"}   # no bar for uncategorised items
+        bad = [f"{cat}: chart {got.get(cat, 0.0):g} vs {w:g}" for cat, w in want.items() if not _near(got.get(cat, 0.0), w)]
+        bad += [f"{cat}: chart {v:g}, not expected" for cat, v in got.items() if cat not in want and abs(v) > TOLERANCE]
+        ck.add(group, f"{field} per category = Σ {rule}", not bad,
+               "; ".join(f"{cat}: {w:g}" for cat, w in want.items()),
+               "; ".join(bad) or "; ".join(f"{cat}: {v:g}" for cat, v in got.items()))
+    labels = [_txt(x) for x in pie_data.get("labels", [])]
+    data = (pie_data.get("datasets") or [{}])[0].get("data") or []
+    got = dict(zip(labels, data))
+    for field in CHART_FORMULAS:
+        label = _find(field, labels)
+        ck.add(group, f"Overall Variance {field} % = {DOUGHNUT_FORMULA.split(' if ')[0]}",
+               label is not None and _near(got.get(label), pie[field], 0.01),
+               f"{pie[field]} (value {overall[field]:g} ÷ stock value {facts['stock_value']:g})",
+               got.get(label) if label else "MISSING")
+    st["doughnut_sum"] = sum(float(x or 0) for x in data)
+
+
+def _ui_facts(st):
+    """Named values for KNOWN_FINDINGS."""
+    vals = [_row_vals(r) for r in st["rows"]]
+    unverified = [v for v in vals if _calc(CHIP_RULES["Unverified"], **v)]
+    excess = [v for v in vals if _calc(CHIP_RULES["Excess Line Item"], **v)]
+    conflict = [v for v in vals if _calc(CHIP_RULES["Location Conflict"], **v)]
+    return {"off_sheet_counted": (st.get("chart_facts") or {}).get("off_sheet_counted", []),
+            "doughnut_sum": st.get("doughnut_sum", 100),
+            "conflict_unverified_or_excess": sum(1 for v in conflict if v in unverified or v in excess),
+            "unverified_negative": sum(1 for v in unverified if v["variance"] < 0),
+            "export_read": bool(st["sheets"]),
+            "export_not_found_sheet": any(_key(n) == "notfound" for n in st["sheets"]),
+            "completed": st["status"] in ("Completed", "Auto Completed"),
+            "not_found_with_auditor": sum(1 for v in vals if _calc(CHIP_RULES["Not Found"], **v))}
+
+
+def _check_findings(ck, st):
+    facts = _ui_facts(st)
+    for fid, title, cond in KNOWN_FINDINGS:
+        seen = bool(_calc(cond, **facts))
+        ck.add("Spec findings", f"{fid}: {title}", True, "not seen", f"seen ({cond}; {facts})" if seen else "not seen",
+               status="KNOWN" if seen else "PASS", finding=f"spec {fid}" if seen else "")
+
+
+# ----------------------------------------------------------------------
+# entry point
+# ----------------------------------------------------------------------
+def validate_summary_ui(page, config) -> bool:
+    """Validate the Audit Summary page of config.ap_audit_name from the UI against the data block above.
+    Read-only: nothing that changes the audit is clicked. Writes Summary_UI_Validation.xlsx."""
+    audit = config.ap_audit_name
+    folder = os.path.join(getattr(config, "e2e_output_dir", os.getcwd()),
+                          f"Summary_UI_{audit}_{datetime.now():%m%d_%H%M}")
+    os.makedirs(folder, exist_ok=True)
+    section(f"AUDIT SUMMARY UI VALIDATION  >  {audit}")
+    ck, st = _UIChecks(page, folder), {"audit": audit, "config": config, "prices": {}, "sheets": {}, "export_path": None}
+    try:
+        st["tab"], st["list_row"] = _ui_open_summary(page, config)
+        _ui_summarize(page, "Item")
+        _ui_chip(page, "All")
+        st["tiles"], st["chips"] = _ui_tiles(page), _ui_chips(page)
+        st["status"] = st["tiles"].get(_find("Status", list(st["tiles"])) or "", "")
+        bar = page.locator(f"{UI_SUMMARY} div.progress-bar").first
+        st["progress_bar"] = float(bar.get_attribute("aria-valuenow")) if bar.count() and bar.get_attribute("aria-valuenow") else None
+        st["qty"], st["value"] = _ui_cards(page, "Qty"), _ui_cards(page, "Value")
+        st["headers"], st["rows"] = _ui_headers(page), _ui_all_rows(page)
+        st["charts"], st["options"] = _ui_charts(page), _ui_options(page)
+        print(f"   read: {len(st['rows'])} row(s), chips={dict(st['chips'])}, status={st['status']}")
+    except Exception as e:
+        ck.error("Audit Summary", "open and read the page", e)
+        path = _ui_write_report(ck, folder, config)
+        print(f"   report: {path}")
+        return False
+    try:
+        st["export_path"], st["sheets"] = _ui_export(page, folder)
+        st["prices"] = _ui_prices(st["sheets"])
+    except Exception as e:
+        ck.error("Actions", "Export download", e)
+    steps = [("Audit Information", lambda: _check_information(ck, st)),
+             ("Audit Summary Counts", lambda: _check_counts(ck, st, page)),
+             ("Quantity Summary", lambda: _check_quantities(ck, st)),
+             ("Audit Report - Table Fields", lambda: _check_table(ck, st)),
+             ("Charts", lambda: _check_charts(ck, st)),
+             ("Summary Options", lambda: _check_options(ck, st, page)),
+             ("Actions", lambda: _check_actions(ck, st, page)),
+             ("Spec findings", lambda: _check_findings(ck, st))]
+    for group, fn in steps:
+        try:
+            fn()
+        except Exception as e:
+            ck.error(group, "checks of this group", e)
+    path = _ui_write_report(ck, folder, config)
+    counts = Counter(r["Status"] for r in ck.rows)
+    print("\n" + "=" * 70 + f"\n  AUDIT SUMMARY UI VALIDATION — {audit}\n" + "=" * 70)
+    print(f"  {dict(counts)}   report: {path}")
+    return counts.get("FAIL", 0) == 0

@@ -24,8 +24,9 @@ from A_as_table import A_as_table
 from A_audit_Summary import A_audit_Summary
 from A_Recently_audit import A_Recently_Audit
 from audit.finish_complete_flow import run_finish_complete
-from audit.e2e_stock_audit import run_e2e_stock_audit
+from audit.e2e_stock_audit import run_e2e_stock_audit, run_new_audit_summary
 from audit.settings_tests import run_settings_tests
+from audit.summary_page_tests import run_summary_page_tests
 
 
 
@@ -170,6 +171,16 @@ class Config:
     run_A_audit_Summary = False
     EXCEL_SHEET_audit_Summary = "auditSummary"
     FILTER_COLUMN = "filter"
+    # Audit Summary page test cases (TC-SUM-xx), read-only on ap_audit_name: Audit Details, Auditor
+    # Insights, both charts, badges, Summarize As, Qty/Value, search, column filters, sort, paging, Export
+    run_summary_page_tests = False
+    summary_inventory_type = "Unit"          # Summarize As options expected for the audit's group
+    # New audit on an existing group, counted from the built-in plan, then the Audit Summary page tests
+    # (creates audit QA_SUM_<MMdd_HHmm> with its stock sheet and counts; nothing is finished or completed)
+    run_new_audit_summary = False
+    summary_group = "Item_Unit"              # its items + stock come from EXCEL_PATH sheet "Data"
+    summary_excess_item = "ITM0039"          # in the group, not on the stock sheet -> counted as an excess line
+    summary_excess_cost = 100                # its item master cost price
     run_A_Recently_Audit = True
     EXCEL_SHEET_Recently_Audit = "Recently_Audit"
 
@@ -262,9 +273,17 @@ if __name__ == "__main__":
             print(" A_SA_table skipped")
         if Config.run_A_audit_Summary:
             print(" A_audit_Summary running")
-            A_audit_Summary(page, Config)  
+            A_audit_Summary(page, Config)
         else:
             print(" A_audit_Summary skipped")
+        if Config.run_summary_page_tests:
+            run_summary_page_tests(page, Config)
+        else:
+            print(" summary_page_tests skipped")
+        if Config.run_new_audit_summary:
+            run_new_audit_summary(page, Config)
+        else:
+            print(" new_audit_summary skipped")
         if Config.run_A_Recently_Audit:
             print(" A_Recently_Audit running")
             A_Recently_Audit(page, Config)

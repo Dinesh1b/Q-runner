@@ -590,7 +590,18 @@ def tc_photo_required(page, Config):
 # ======================================================
 # REPORT
 # ======================================================
-def write_report(run, folder, audit_name, Config):
+def _settings_severity(case):
+    if case["Actual Result"].startswith("error:"):
+        return "Critical", "High"
+    return ("Major", "Medium") if case["Group"].startswith(("B", "C", "D")) else ("Minor", "Low")
+
+
+def write_report(run, folder, audit_name, Config, label="AUDIT SETTINGS TESTS", file_prefix="Settings_Tests",
+                 sub_module="Audit Settings", preconditions=None,
+                 impact="Audit settings can be saved wrong or not applied to counting.",
+                 fix="Check the settings validation, save API and how the setting is applied.",
+                 severity=_settings_severity):
+    """Test Cases + Bugs workbook in folder; the keyword arguments let other test suites reuse it."""
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Font, PatternFill
     fills = {"PASS": "C6EFCE", "FAIL": "FFC7CE", "NOT RUN": "D9D9D9", "BLOCKED": "D9D9D9", "MANUAL": "FFEB9C"}
@@ -608,16 +619,12 @@ def write_report(run, folder, audit_name, Config):
             "Impact", "Suggested Fix"]
     wb_bugs.append(cols)
     for n, c in enumerate(fails, 1):
-        severity = ("Major", "Medium") if c["Group"].startswith(("B", "C", "D")) else ("Minor", "Low")
-        if c["Actual Result"].startswith("error:"):
-            severity = ("Critical", "High")
+        sev, priority = severity(c)
         wb_bugs.append([
-            f"SA-BUG-{n:03d}", "Stock Audit", f"Audit Settings — {c['Group']}", f"{c['Test Case ID']}: {c['Title']}",
-            getattr(Config, "environments", "QA"), severity[0], severity[1],
-            f"1. User is logged in as the audit owner.\n2. Audit {audit_name} exists with a stock sheet.",
-            c["Steps"], c["Expected Result"], c["Actual Result"], "Always", "New", c["Attachment"],
-            "Audit settings can be saved wrong or not applied to counting.",
-            "Check the settings validation, save API and how the setting is applied.",
+            f"SA-BUG-{n:03d}", "Stock Audit", f"{sub_module} — {c['Group']}", f"{c['Test Case ID']}: {c['Title']}",
+            getattr(Config, "environments", "QA"), sev, priority,
+            preconditions or f"1. User is logged in as the audit owner.\n2. Audit {audit_name} exists with a stock sheet.",
+            c["Steps"], c["Expected Result"], c["Actual Result"], "Always", "New", c["Attachment"], impact, fix,
         ])
     for sheet in (ws, wb_bugs):
         for cell in sheet[1]:
@@ -626,10 +633,10 @@ def write_report(run, folder, audit_name, Config):
             sheet.column_dimensions[col[0].column_letter].width = min(max(10, max(len(str(c.value or "")) for c in col) + 2), 60)
             for c in col:
                 c.alignment = Alignment(wrap_text=True, vertical="top")
-    path = os.path.join(folder, f"Settings_Tests_{os.path.basename(folder)}.xlsx")
+    path = os.path.join(folder, f"{file_prefix}_{os.path.basename(folder)}.xlsx")
     wb.save(path)
     counts = {s: sum(1 for c in run.cases if c["Status"] == s) for s in ("PASS", "FAIL", "NOT RUN", "BLOCKED", "MANUAL")}
-    print("\n" + "=" * 70 + f"\n  AUDIT SETTINGS TESTS — {audit_name}\n" + "=" * 70)
+    print("\n" + "=" * 70 + f"\n  {label} — {audit_name}\n" + "=" * 70)
     for c in run.cases:
         print(f"  {c['Test Case ID']:<11} {c['Status']:<8} {c['Title']}")
     print(f"  {counts}   bugs: {len(fails)}   report: {path}")

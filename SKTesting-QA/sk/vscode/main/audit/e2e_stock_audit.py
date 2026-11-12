@@ -59,28 +59,71 @@ ITEM_PLAN = [
     (60,  "SA-A3-B5-L2", 0,  5,    0,    None, "Investigate", None, "Misplaced"),     # excess (not on sheet)
 ]
 
+# Run on an existing group (items + stock from Config.EXCEL_PATH sheet Data): counted, damaged, count location.
+# None = no location chosen: the count goes to the item's own stock location (those SA-... locations are
+# not in the audit location tree). Once a location is chosen it stays for the next counts, so the counts
+# sheet lists the rows with a location last.
+COUNT_PLAN_EXISTING = {
+    "ITM0001": (10, None, None),     # matched
+    "ITM0002": (13, 1, None),        # positive, damaged
+    "ITM0003": (6, None, None),      # negative
+    "ITM0004": (10, None, "w1"),     # matched qty, counted at another location
+    "ITM0005": (None, None, None),   # not counted -> Un Verified
+    "ITM0006": (None, None, None),   # not counted -> Un Verified
+    "ITM0007": (12, None, None),     # positive
+    "ITM0008": (8, None, None),      # negative
+    "ITM0009": (10, None, None),     # matched
+    "ITM0010": (4, 2, None),         # negative, damaged
+}
+EXCESS_COUNT, EXCESS_LOCATION = 5, "w1"     # Config.summary_excess_item: in the group, not on the sheet
 
-def build_run(Config) -> dict:
+
+def _item(code, name, category, cost, location, stock, counted, damaged, count_loc, barcode=""):
+    num = lambda v: None if v is None or pd.isna(v) else float(v)
+    return {"code": code, "name": name, "category": category, "barcode": barcode, "cost": num(cost),
+            "sell": (num(cost) or 0) * 1.5, "location": location, "stock": num(stock) or 0.0,
+            "counted": num(counted), "damaged": num(damaged), "count_loc": count_loc,
+            "action": "Accept", "recount": None, "note": "Misplaced", "on_sheet": (num(stock) or 0) > 0}
+
+
+def _existing_items(Config):
+    """Items of an existing group as its stock sheet lists them (Config.EXCEL_PATH sheet Data), counted
+    as COUNT_PLAN_EXISTING says, plus Config.summary_excess_item counted although it is not on the sheet."""
+    items = []
+    for _, r in pd.read_excel(Config.EXCEL_PATH, sheet_name="Data").iterrows():
+        code = str(r["Item Code"]).strip()
+        counted, damaged, count_loc = COUNT_PLAN_EXISTING.get(code, (None, None, None))
+        items.append(_item(code, r["Item Name"], r["Category"], r["Cost Price"], r["Location"], r["Adjustmentqty"],
+                           counted, damaged, count_loc))
+    excess = getattr(Config, "summary_excess_item", None)
+    if excess:
+        items.append(_item(excess, excess, None, getattr(Config, "summary_excess_cost", None), None, 0,
+                           EXCESS_COUNT, None, EXCESS_LOCATION))
+    return items
+
+
+def build_run(Config, existing_group=None) -> dict:
     now = datetime.now()
-    name = f"{getattr(Config, 'e2e_prefix', 'QA_E2E')}_{now:%m%d_%H%M}"
+    prefix = "QA_SUM" if existing_group else getattr(Config, "e2e_prefix", "QA_E2E")
+    name = f"{prefix}_{now:%m%d_%H%M}"
     folder = os.path.join(Config.e2e_output_dir, name)
     os.makedirs(folder, exist_ok=True)
-    items = []
-    for i, (cost, loc, stock, counted, damaged, count_loc, action, recount, note) in enumerate(ITEM_PLAN, 1):
-        items.append({
-            "code": f"E2E{now:%m%d%H%M}-{i:02d}", "name": f"E2E Item {now:%m%d %H%M} {i:02d}",
-            "barcode": f"88{now:%m%d%H%M}{i:02d}", "cost": float(cost), "sell": float(cost) * 1.5,
-            "location": loc, "stock": float(stock), "counted": None if counted is None else float(counted),
-            "damaged": None if damaged is None else float(damaged), "count_loc": count_loc,
-            "action": action, "recount": None if recount is None else float(recount), "note": note,
-            "on_sheet": stock > 0,
-        })
-    run = {"name": name, "group": name, "audit": name, "folder": folder, "items": items,
-           "workbook": os.path.join(folder, f"{name}_data.xlsx"), "started": now,
-           "inventory_type": getattr(Config, "e2e_inventory_type", "Unit")}
+    if existing_group:
+        items = _existing_items(Config)
+    else:
+        items = []
+        for i, (cost, loc, stock, counted, damaged, count_loc, action, recount, note) in enumerate(ITEM_PLAN, 1):
+            item = _item(f"E2E{now:%m%d%H%M}-{i:02d}", f"E2E Item {now:%m%d %H%M} {i:02d}",
+                         getattr(Config, "e2e_category", "GMA"), cost, loc, stock, counted, damaged, count_loc,
+                         barcode=f"88{now:%m%d%H%M}{i:02d}")
+            item.update(action=action, recount=None if recount is None else float(recount), note=note)
+            items.append(item)
+    run = {"name": name, "group": existing_group or name, "audit": name, "folder": folder, "items": items,
+           "workbook": os.path.join(folder, f"{name}_data.xlsx"), "started": now, "existing_group": existing_group,
+           "inventory_type": getattr(Config, "e2e_inventory_type", "Unit"), "last_stage": 9}
 
     items_df = pd.DataFrame([{
-        "Item Name": i["name"], "Item Code": i["code"], "Category": getattr(Config, "e2e_category", "GMA"),
+        "Item Name": i["name"], "Item Code": i["code"], "Category": i["category"],
         "UOM": getattr(Config, "e2e_uom", "kg"), "Cost Price": i["cost"], "Sell Price": i["sell"],
         "Location": i["location"], "Barcode": i["barcode"],
     } for i in items])
@@ -89,7 +132,8 @@ def build_run(Config) -> dict:
     } for i in items if i["on_sheet"]])
     counts_df = pd.DataFrame([{
         "locations": i["count_loc"], "code": i["code"], "audited": i["counted"], "damaged": i["damaged"],
-    } for i in items if i["counted"] is not None])
+    } for i in sorted(items, key=lambda i: i["count_loc"] is not None)    # a chosen location stays: last
+        if i["counted"] is not None])
     flow_df = pd.DataFrame([{
         "code": i["code"], "declaration_note": i["note"], "resolution": i["action"],
         "recount_qty": i["recount"], "remarks": f"e2e {i['action'].lower()}",
@@ -128,7 +172,15 @@ class StageRunner:
         self.res = Results()
         self.meta = []          # per Results row: (stage, screenshot)
         self.blocked = {}       # stage -> reason
+        self.skipped = {}       # stage -> reason (not needed in this run, e.g. an existing group)
         self.errored = set()    # stages that stopped on an exception
+
+    def skip(self, n, reason):
+        print("\n" + "=" * 70 + f"\n  STAGE {n}: {STAGES[n]}  — SKIPPED ({reason})\n" + "=" * 70)
+        self.skipped[n] = reason
+
+    def note(self, n):
+        return self.blocked.get(n) or self.skipped.get(n, "")
 
     def _stage_of(self, area, default):
         m = re.match(r"^(\d)\. ", area)
@@ -165,6 +217,8 @@ class StageRunner:
         return [r for r, (s, _) in zip(self.res.rows, self.meta) if s == n]
 
     def status(self, n):
+        if n in self.skipped:
+            return "SKIPPED"
         if n in self.blocked:
             return "BLOCKED"
         rows = self.stage_rows(n)
@@ -293,7 +347,7 @@ def stage_summary_views(page, Config, run, res):
             stock, aud, var = _num(r.get("Stock Quantity")), _num(r.get("Audited Quantity")), _num(r.get("Variance"))
             if var != aud - stock:
                 bad_var.append(f"{code}: {var:g} vs {aud:g}-{stock:g}")
-            if _num(r.get("Variance Value")) != var * items[code]["cost"]:
+            if items[code]["cost"] is not None and _num(r.get("Variance Value")) != var * items[code]["cost"]:
                 bad_val.append(f"{code}: {r.get('Variance Value')} vs {var:g} x {items[code]['cost']:g}")
             if not _sign_ok(var, r.get("Variance Type", "")):
                 bad_type.append(f"{code}: {var:g} -> {r.get('Variance Type')}")
@@ -338,6 +392,8 @@ def stage_summary_views(page, Config, run, res):
     toggle.locator("button.toggle-btn", has_text="Qty").click()
     page.wait_for_timeout(800)
     for metric, key in (("stock", "stock"), ("audited", "counted"), ("damaged", "damaged")):
+        if any(i[key] and i["cost"] is None for i in items.values()):
+            continue                      # an item without a known cost price (excess item, no cost given)
         want = sum((i[key] or 0) * i["cost"] for i in items.values())
         res.check(area, f"Value card: {metric} = sum(qty x cost price)", value.get(metric) == want,
                   f"card={value.get(metric)} expected={want:g}")
@@ -435,7 +491,7 @@ def bug_cards(runner, run, Config):
 def write_report(runner, run, Config):
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Font, PatternFill
-    fills = {"PASS": "C6EFCE", "FAIL": "FFC7CE", "BLOCKED": "D9D9D9", "NOT RUN": "D9D9D9"}
+    fills = {"PASS": "C6EFCE", "FAIL": "FFC7CE", "BLOCKED": "D9D9D9", "NOT RUN": "D9D9D9", "SKIPPED": "D9D9D9"}
     wb = Workbook()
 
     ws = wb.active
@@ -446,13 +502,19 @@ def write_report(runner, run, Config):
         rows = runner.stage_rows(n)
         status = runner.status(n)
         statuses.append(status)
-        ws.append([n, name, status, sum(1 for r in rows if r[2]), sum(1 for r in rows if not r[2]),
-                   runner.blocked.get(n, "")])
+        ws.append([n, name, status, sum(1 for r in rows if r[2]), sum(1 for r in rows if not r[2]), runner.note(n)])
         ws.cell(ws.max_row, 3).fill = PatternFill("solid", fgColor=fills[status])
-    flow = "PASS" if all(s == "PASS" for s in statuses) else "FAIL"
-    ws.append(["", "Audit flow (final stock + reports verified)", flow, "", "",
-               f"group / audit: {run['group']}"])
+    # stages after run["last_stage"] were not part of this run; skipped ones were not needed
+    ran = [s for n, s in zip(STAGES, statuses) if n <= run["last_stage"] and s != "SKIPPED"]
+    flow = "PASS" if ran and all(s == "PASS" for s in ran) else "FAIL"
+    label = ("Audit flow (final stock + reports verified)" if run["last_stage"] >= 9
+             else f"Audit flow up to stage {run['last_stage']}")
+    ws.append(["", label, flow, "", "", f"group / audit: {run['group']} / {run['audit']}"])
     ws.cell(ws.max_row, 3).fill = PatternFill("solid", fgColor=fills[flow])
+    if run.get("summary"):
+        ok, path = run["summary"]
+        ws.append(["", "Audit Summary page tests", "PASS" if ok else "FAIL", "", "", path])
+        ws.cell(ws.max_row, 3).fill = PatternFill("solid", fgColor=fills["PASS" if ok else "FAIL"])
 
     wc = wb.create_sheet("Checks")
     wc.append(["Stage", "Area", "Check", "Result", "Detail"])
@@ -480,18 +542,24 @@ def write_report(runner, run, Config):
 
     print("\n" + "=" * 70 + f"\n  STOCK AUDIT E2E — {run['name']}\n" + "=" * 70)
     for (n, name), status in zip(STAGES.items(), statuses):
-        print(f"  {n}. {name:<22} {status:<8} {runner.blocked.get(n, '')}")
-    print(f"  Audit flow: {flow}   bugs: {len(cards)}   report: {path}")
+        print(f"  {n}. {name:<22} {status:<8} {runner.note(n)}")
+    print(f"  {label}: {flow}   bugs: {len(cards)}   report: {path}")
+    if run.get("summary"):
+        print(f"  Audit Summary page tests: {'PASS' if run['summary'][0] else 'FAIL'}   report: {run['summary'][1]}")
     return flow == "PASS", path
 
 
 # ======================================================
 # ENTRY POINT
 # ======================================================
-def run_e2e_stock_audit(page, Config) -> bool:
+def run_e2e_stock_audit(page, Config, existing_group=None, last_stage=9, summary_tests=False) -> bool:
+    """existing_group: audit that group (no group / item creation, stages 1-2 skipped);
+    last_stage: stop after it (6 = counted and summary checked, nothing finished);
+    summary_tests: then run the Audit Summary page tests on the new audit."""
     from audit.e2e_complete_resolution import run_complete_resolution
-    run = build_run(Config)
-    print(f"\n🔷 STOCK AUDIT E2E: {run['name']}   data: {run['workbook']}")
+    run = build_run(Config, existing_group)
+    run["last_stage"] = last_stage
+    print(f"\n🔷 STOCK AUDIT E2E: {run['name']}   group: {run['group']}   data: {run['workbook']}")
     runner = StageRunner(page, run["folder"])
     auditor = getattr(Config, "fc_auditor", None) or Config.Auditor2
     overrides = {
@@ -511,21 +579,40 @@ def run_e2e_stock_audit(page, Config) -> bool:
         "EXCEL_SHEET_auditor_1": "Counts", "EXCEL_LOCATION_COL1": "locations", "EXCEL_CODE_COL1": "code",
         "EXCEL_AUDITED_COL1": "audited", "EXCEL_DAMAGED_COL1": "damaged", "run_new_add_item": False,
         "run_asv2_checks": True, "asv2_results": runner.res, "EXCEL_SHEET_finish_flow": "finish_flow",
+        # an existing group's items: a count saved with no location chosen goes to the item's own location
+        "asv2_item_locations": {i["code"]: i["location"] for i in run["items"] if i["location"]}
+                               if existing_group else None,
     }
     saved = {k: getattr(Config, k, None) for k in overrides}
     try:
         for k, v in overrides.items():
             setattr(Config, k, v)
         res = runner.res
-        runner.run(1, stage_create_group, page, Config, run, res)
-        runner.run(2, stage_import_items, page, Config, run, res, needs=(1,))
-        runner.run(3, stage_create_audit, page, Config, run, res, needs=(1,))
-        runner.run(4, stage_import_stock_sheet, page, Config, run, res, needs=(2, 3))
+        if existing_group:
+            runner.skip(1, f"existing group {existing_group}")
+            runner.skip(2, f"items of {existing_group} (sheet Data)")
+        else:
+            runner.run(1, stage_create_group, page, Config, run, res)
+            runner.run(2, stage_import_items, page, Config, run, res, needs=(1,))
+        runner.run(3, stage_create_audit, page, Config, run, res, needs=() if existing_group else (1,))
+        runner.run(4, stage_import_stock_sheet, page, Config, run, res, needs=(3,) if existing_group else (2, 3))
         runner.run(5, stage_count, page, Config, run, res, needs=(4,))
         runner.run(6, stage_summary_views, page, Config, run, res, needs=(5,))
-        run_complete_resolution(page, Config, run, runner)
+        if last_stage >= 7:
+            run_complete_resolution(page, Config, run, runner)
+        if summary_tests and 3 not in runner.errored and 3 not in runner.blocked:
+            from audit.summary_page_tests import run_summary_page_tests
+            known = {i["code"]: i["cost"] for i in run["items"] if i["cost"] is not None}
+            ok = run_summary_page_tests(page, Config, folder=run["folder"], known_costs=known)
+            run["summary"] = (ok, os.path.join(run["folder"], f"Summary_Page_Tests_{run['name']}.xlsx"))
     finally:
         for k, v in saved.items():
             setattr(Config, k, v)
     ok, _ = write_report(runner, run, Config)
-    return ok
+    return ok and (run.get("summary") or (True,))[0]
+
+
+def run_new_audit_summary(page, Config) -> bool:
+    """Create an audit on Config.summary_group, import its stock sheet, count it, then run the Audit
+    Summary page tests on it. Nothing is finished or completed."""
+    return run_e2e_stock_audit(page, Config, existing_group=Config.summary_group, last_stage=6, summary_tests=True)

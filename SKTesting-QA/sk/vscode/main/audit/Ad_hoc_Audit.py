@@ -1,6 +1,8 @@
 import re
 import time
 
+from audit.A_audit_Summary import wait_spinner
+
 
 
 # --------------------------------------------------------------
@@ -131,11 +133,13 @@ def Ad_hoc_Audit(page, Config):
         page.wait_for_selector("a[href='/home/audit']", state="visible")
         page.click("a[href='/home/audit']")
         time.sleep(SLEEP_TIME)
+        wait_spinner(page)          # the audit list's loading backdrop covers the header until it loads
 
         # Branch selection before creating audit to avoid branch-related issues
         select_branch(page, Config.Branch)
         print(f"   Branch selected: {Config.Branch}")
         time.sleep(SLEEP_TIME)
+        wait_spinner(page)
         page.locator("button.createAuditBtn", has_text="Create Audit").click()
         
         time.sleep(SLEEP_TIME)

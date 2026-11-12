@@ -28,6 +28,7 @@ SWAP_BTN     = "app-audit-stock-v2 button.asv2-swap-btn"
 LIST         = "app-audit-stock-list-v2"
 LIST_SEARCH  = f"{LIST} input[placeholder='Search code / name']"
 COUNT_DLG    = "div.count-summary-dialog"
+COUNT_DLG_CLOSE = f"{COUNT_DLG} button.asv2-dialog-close, {COUNT_DLG} button.cs-close"   # new / older builds
 PRINT_DLG    = "div.lp-print-dialog"
 DECLARATION  = "app-audit-declaration"
 SUMMARY      = "app-audit-summary"
@@ -254,6 +255,7 @@ def check_list(page, res: Results, state: dict, entered: List[Entered], count_be
         act_aud = _num(row[idx["AUDITED QTY"]])
         act_dam = _num(row[idx["DAMAGED QTY"]]) if "DAMAGED QTY" in idx else 0.0
         act_loc = _clean(row[idx["AUDITED LOCATION"]]) if "AUDITED LOCATION" in idx else ""
+        location = location or state["item_locations"].get(code)    # no location chosen: the item's own
         exp_loc = location.split("-")[-1] if location else "Unassigned"
         res.check(area, f"{code} audited qty", act_aud == float(audited), f"excel={audited} list={act_aud}")
         res.check(area, f"{code} damaged qty", act_dam == float(damaged or 0), f"excel={damaged} list={act_dam}")
@@ -328,10 +330,12 @@ def check_count_summary(page, res: Results, state: dict, entered: List[Entered],
                           f"{tab_items:g} vs {len(totals)}")
             else:
                 labels = " | ".join(r[0] for r in rows).lower()
-                for loc in sorted({(e[3] or "Unassigned") for e in entered}):
+                for loc in sorted({(e[3] or state["item_locations"].get(e[0]) or "Unassigned") for e in entered}):
                     res.check(area, f"Location Wise lists {loc}", loc.split("-")[-1].lower() in labels, labels[:60])
     finally:
-        page.locator(f"{COUNT_DLG} button.cs-close").click()
+        from audit.finish_complete_flow import _close_guide
+        _close_guide(page)                   # the guide panel can slide in over the dialog's close button
+        page.locator(COUNT_DLG_CLOSE).first.click(timeout=10000)      # Escape does not close it
         page.locator(COUNT_DLG).wait_for(state="hidden", timeout=5000)
 
 
@@ -554,11 +558,29 @@ def run_stock_audit_checks(page, Config, entered: List[Entered], list_count_befo
     print("🔷 STOCK AUDIT v2 — FEATURE CHECKS + CROSS-CHECK")
     print("-" * 70)
     # An end-to-end run can collect these checks into its own Results
-    res, state = getattr(Config, "asv2_results", None) or Results(), {}
-    res.section("Toolbar", check_toolbar, page, res, state)
-    res.section("Recently audited list", check_list, page, res, state, entered, list_count_before)
-    res.section("Count summary", check_count_summary, page, res, state, entered, run_started)
-    res.section("Print labels", check_print_labels, page, res)
-    res.section("Finish audit", check_finish_declaration, page, res, state)
-    res.section("Audit Summary", check_audit_summary, page, Config, res, state, entered)
+    res = getattr(Config, "asv2_results", None) or Results()
+    # {item code: stock location} when known: a count saved with no location chosen goes there
+    state = {"item_locations": dict(getattr(Config, "asv2_item_locations", None) or {})}
+    for area, fn, *args in (
+            ("Toolbar", check_toolbar, page, res, state),
+            ("Recently audited list", check_list, page, res, state, entered, list_count_before),
+            ("Count summary", check_count_summary, page, res, state, entered, run_started),
+            ("Print labels", check_print_labels, page, res),
+            ("Finish audit", check_finish_declaration, page, res, state),
+            ("Audit Summary", check_audit_summary, page, Config, res, state, entered)):
+        _clear_page(page)
+        res.section(area, fn, *args)
     return res.report()
+
+
+def _clear_page(page) -> None:
+    """Close what can be left over the Stock Audit page: the "Audit progress" guide panel (it slides in
+    and covers dialog buttons) and a dialog a failed section left open."""
+    from audit.finish_complete_flow import _close_guide      # imported here: that module imports this one
+    _close_guide(page)
+    if page.locator(f"{COUNT_DLG}:visible").count():
+        page.locator(COUNT_DLG_CLOSE).first.click()
+        page.locator(COUNT_DLG).wait_for(state="hidden", timeout=5000)
+    if page.locator(f"{PRINT_DLG}:visible").count():
+        page.locator(f"{PRINT_DLG} button.danger-button:has-text('Cancel')").click()
+        page.locator(PRINT_DLG).wait_for(state="hidden", timeout=5000)
