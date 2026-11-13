@@ -211,10 +211,10 @@ class Config:
     oa_mapping = {}
 
     # --- Inventory Setup ---
-    group_name     = "Group_34"
-    inventory_type = "Serialized"
+    group_name     = "QA_GRP_1112_2214"
+    inventory_type = "Unit"
     fields         = ['Item Code', 'Item Name']
-    ids            = ['Serial Number', 'IMEI', 'Barcode']
+    ids            = []
 
     # Accounting tab (accounts: formcontrolname -> account name)
     accounting_mode     = "Basic Accounting Mode"
@@ -227,7 +227,7 @@ class Config:
     # UOM Conversions tab: True = on, False = off
     # Extra rows read 1 <uom> = <quantity> <base>   (base defaults to the Primary UOM)
     # UOMs: Bale, Bottle, Box, Case, Container, Crate, Meter, Pallet, Piece, Roll, Unit
-    enable_uom_conversions = True
+    enable_uom_conversions = False   # Unit group: the items keep their own UOM (sheet Data: kg, ml, ...)
     primary_uom    = "Bale"
     uom_value_type = "Integer only"
     secondary_uoms = [{"uom": "Box", "quantity": 12}]                     # 1 Box = 12 Bale

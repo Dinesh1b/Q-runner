@@ -30,7 +30,7 @@ def _enter_resolution(page, Config, res, st):
         elif "Unverified items" in text:
             m = re.search(r"There are (\d+) items not counted", text)
             st["unverified"] = int(m.group(1)) if m else 0
-            choice = getattr(Config, "fc_unverified_choice", "Move to Not Found")
+            choice = getattr(Config, "complete_choice", "Move to Not Found")
             res.check("Complete popup", f"Unverified step -> {choice}", True, f"{st['unverified']} items not counted")
             popup.locator("button", has_text=choice).click()
         elif "Proceed to Resolution" in text:
@@ -50,10 +50,26 @@ def step_start_resolution(page, Config, res, st):
     cfg = SummaryCfg()
     click_badge(page, cfg, "All")
     st["summary"] = {r["Item Code"].upper(): r for r in collect_all(page, cfg)}
+    # The notes picked at Finish audit > Audit Declaration are not shown in the summary's Declaration Note
+    # column before resolution: correct (user, 2026-11-13). "Reason" = that column (collect_all alias).
     for code, note in st.get("declared", {}).items():
-        shown = st["summary"].get(code.upper(), {}).get("Reason", "")
-        res.check(area, f"{code} declaration note carried to summary", shown.lower() == note.lower(),
-                  f"declared={note!r} summary={shown!r}")
+        shown = _clean(st["summary"].get(code.upper(), {}).get("Reason", ""))
+        res.check(area, f"{code} declaration note not shown in the summary before resolution",
+                  shown in ("", "-"), f"declared={note!r} summary={shown!r}")
 
     url = _enter_resolution(page, Config, res, st)
     res.check("Complete popup", "Opens resolution", "auditresolutionaction" in url, url.split("/")[-1])
+
+    # Read the summary again: before the popup Un Verified rows show variance 0, after Move to Not Found they
+    # show -Stock. Steps 8-10 compare with st["summary"], i.e. what the page shows after the popup.
+    st["summary_before"] = st["summary"]
+    _open_audit(page, Config, "Audit Summary")
+    click_badge(page, cfg, "All")
+    st["summary"] = {r["Item Code"].upper(): r for r in collect_all(page, cfg)}
+    status = _clean(page.locator(f"{SUMMARY} div.status-pill").first.inner_text())
+    res.check("Complete popup", "Status after Proceed to Resolution = In Resolution", status == "In Resolution", status)
+    changed = sorted(c for c, r in st["summary"].items()
+                     if _clean(r.get("Variance")) != _clean(st["summary_before"].get(c, {}).get("Variance")))
+    print(f"   summary read again: variance changed for {changed or 'no item'}")
+    url = _enter_resolution(page, Config, res, st)     # In Resolution: Complete Audit opens Audit Resolution
+    res.check("Complete popup", "Back on the resolution page", "auditresolutionaction" in url, url.split("/")[-1])

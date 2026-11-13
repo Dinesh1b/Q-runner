@@ -580,7 +580,16 @@ def select_navigation_option(page, option_name: str):
         """
         option_name: one of 'Stock Audit', 'Audit Summary', 'Settings'
         """
-        page.wait_for_selector("div[role='dialog'][aria-labelledby='auditNavTitle']")
+        dialog = page.locator("div[role='dialog'][aria-labelledby='auditNavTitle']")
+        try:
+            dialog.first.wait_for(state="visible", timeout=15000)
+        except Exception:
+            # A user who is only an auditor (not the owner) goes straight to the Stock Audit page: no choice dialog
+            landed = {"Stock Audit": "/stock", "Audit Summary": "/auditSummary"}.get(option_name)
+            if landed and landed in page.url:
+                print(f"   No choice dialog: {option_name} opened directly")
+                return
+            raise
 
         card = page.locator(
             f"button.create-type-card:has(h6.create-type-card__title:text-is('{option_name}'))"
@@ -657,10 +666,16 @@ def navigate_to_audit(page, config):
 def A_audit_Summary(page, config):
     """Audit Summary checks: the UI validation (fields, values and formulas of the data block in
     the UI VALIDATION section), then the Excel compare. config.summary_ui_validation /
-    config.summary_excel_compare = False skip either one."""
+    config.summary_excel_compare = False skip either one. config.summary_move_not_found = True also runs
+    Complete Audit > Move to Not Found > Proceed to Resolution (the audit goes In Resolution), checks it
+    and validates the page again."""
     ok = True
     if getattr(config, "summary_ui_validation", True):
         ok = validate_summary_ui(page, config) and ok
+    if getattr(config, "summary_move_not_found", False):
+        ok = check_move_to_not_found(page, config) and ok
+        if getattr(config, "summary_ui_validation", True):
+            ok = validate_summary_ui(page, config) and ok
     if getattr(config, "summary_excel_compare", True):
         ok = _excel_compare(page, config) and ok
     return ok
@@ -756,12 +771,82 @@ MAPPING_TYPES = ["Random", "ByCategory", "ByStorage", "ByLocation"]
 DATE_FORMATS = {"Date & Time": "%Y-%m-%d %H:%M", "Audited Date": "%m-%d-%y %H:%M"}
 TOLERANCE = 0.05                                                               # money / quantity rounding
 
-# One report row. Names: stock, audited, damaged, price (CostPrice of the item in the export).
+# One report row of an AUDITED line item. Names: stock, audited, damaged, price (CostPrice of the item in the
+# export). Line items that were not audited are checked by NOT_AUDITED_EXPECT instead.
 ROW_FORMULAS = OrderedDict([
     ("Variance", "audited - stock"),                                           # damaged qty not included
     ("Variance Value", "(audited - stock) * price"),
     ("Variance Type", "'Positive' if audited > stock else 'Negative' if audited < stock else '-'"),
 ])
+
+# Line items NOT audited = the Un Verified items (user rule, 2026-11-12): only line items with a real count
+# show auditor details, an audited date and a variance.
+#   Which rows: the rows the NOT_AUDITED_CHIP chip lists; when that list was not read, the rows meeting
+#   CHIP_RULES[NOT_AUDITED_CHIP].
+#   NOT_AUDITED_EXPECT: field -> (rule every not-audited row must meet, related spec finding).
+#   AUDITED_EXPECT: field -> rule every audited row must meet.
+#   Names: as in CHIP_RULES, plus audited_date, variance, variance_value, variance_type.
+NOT_AUDITED_CHIP = "Unverified"
+NOT_AUDITED_EXPECT = OrderedDict([
+    ("Audited Quantity", ("audited == 0", "")),
+    ("Auditor", ("auditor == ''", "")),
+    ("Audited Date", ("audited_date == ''", "")),
+    ("Variance", ("variance == 0", "03 F12")),
+    ("Variance Value", ("variance_value == 0", "03 F12")),
+    ("Variance Type", ("variance_type in ('-', 'Not Audited')", "03 F12")),
+])
+AUDITED_EXPECT = OrderedDict([
+    ("Auditor", "auditor != ''"),
+    ("Audited Date", "audited_date != ''"),
+])
+
+# Move to Not Found (spec 03 §3.1 steps 6-9, §3.2, findings 8 / 26): Complete Audit > Yes > "Unverified items"
+# > Move to Not Found > Proceed to Resolution, then the summary is read again. The moved rows are the rows the
+# Un Verified chip listed before.
+#   MOVE_NOT_FOUND_POPUP: the step-2 count. Names: popup (N in "There are N items not counted"), before.
+#   MOVE_NOT_FOUND_CHIPS: chip -> count after the move. Names: before (chip counts before), moved (rows moved).
+#   MOVE_NOT_FOUND_EXPECT: field -> (PASS rule, KNOWN rule or None, spec finding) for every moved row; a row
+#   meeting neither rule is a FAIL. Names: as in CHIP_RULES plus audited_date, variance, variance_type,
+#   resolution_status, completer (the logged-in user who completed).
+MOVE_NOT_FOUND_STATUS = "In Resolution"                   # status after Proceed to Resolution
+MOVE_NOT_FOUND_POPUP = "popup == before['Unverified']"    # N = items on the Un Verified list
+MOVE_NOT_FOUND_CHIPS = OrderedDict([
+    ("Unverified", "0"),
+    ("Not Found", "before['Not Found'] + moved"),
+    ("Negative Variance", "before['Negative Variance'] + moved"),
+    ("All", "before['All']"),
+])
+MOVE_NOT_FOUND_EXPECT = OrderedDict([
+    ("Audited Quantity", ("audited == 0", None, "")),
+    ("Damaged Qty", ("damaged == 0", None, "")),
+    ("Auditor", ("auditor == ''", "auditor == completer", "03 F26")),   # the server names the completer
+    ("Audited Location", ("audited_location == stock_location", None, "")),
+    ("Audited Date", ("audited_date != ''", None, "")),
+    ("Variance", ("variance == -stock", None, "")),
+    ("Variance Type", ("variance_type == 'Negative'", None, "")),
+    ("Resolution Status", ("resolution_status == 'Pending'", None, "")),
+])
+# "Keep as Unverified" (same step, other choice): the items stay Un Verified, are left out of Resolution
+# (spec 03 §3.1 step 7) and keep the Not Audited rule (NOT_AUDITED_EXPECT).
+KEEP_UNVERIFIED_CHIPS = OrderedDict([
+    ("Unverified", "before['Unverified']"),
+    ("Not Found", "before['Not Found']"),
+    ("Negative Variance", "before['Negative Variance']"),
+    ("All", "before['All']"),
+])
+KEEP_UNVERIFIED_EXPECT = OrderedDict([
+    ("Audited Quantity", ("audited == 0", None, "")),
+    ("Auditor", ("auditor == ''", None, "")),
+    ("Audited Date", ("audited_date == ''", None, "")),
+    ("Variance", ("variance == 0", None, "03 F12")),
+    ("Variance Type", ("variance_type in ('-', 'Not Audited')", None, "03 F12")),
+    ("Resolution Status", ("resolution_status == ''", None, "")),
+])
+# The popup choice comes from config.complete_choice; its rules: choice -> (chips after, rows after)
+UNVERIFIED_CHOICE_RULES = {
+    "Move to Not Found": (MOVE_NOT_FOUND_CHIPS, MOVE_NOT_FOUND_EXPECT),
+    "Keep as Unverified": (KEEP_UNVERIFIED_CHIPS, KEEP_UNVERIFIED_EXPECT),
+}
 
 # Audit Information > Progress (spec 00 / 01 §3). Names: counted_codes (item codes with audited > 0,
 # off-sheet items included), stock_rows (stock-sheet rows = "Total Line Item" of the audit list row),
@@ -860,11 +945,8 @@ KNOWN_FINDINGS = [
     ("02 F5", "Counted items not on the stock sheet are worth 0 in the charts", "len(off_sheet_counted) > 0"),
     ("02 F1", "Doughnut is drawn from the % values, which do not add up to 100", "abs(doughnut_sum - 100) > 1"),
     ("03 F7", "Location Conflict counts Unverified and Excess rows", "conflict_unverified_or_excess > 0"),
-    ("03 F12", "Unverified rows show a negative variance", "unverified_negative > 0"),
     ("03 F13", "Export has no sheet for the Not Found chip", "export_read and not export_not_found_sheet"),
-    ("03 F26", "Not Found rows show the person who completed the audit as Auditor",
-     "completed and not_found_with_auditor > 0"),
-]
+]   # 03 F12 (Un Verified rows with a variance) is a FAIL of the NOT_AUDITED_EXPECT rule
 
 
 # ----------------------------------------------------------------------
@@ -927,7 +1009,16 @@ def _row_vals(r, prices=None):
             "cross_audited": _qn(_cell(r, "Cross Audited Qty")),
             "variance": _qn(_cell(r, "Variance")), "variance_value": _qn(_cell(r, "Variance Value")),
             "variance_type": _blank(_cell(r, "Variance Type")) or "-",
+            "audited_date": _blank(_cell(r, "Audited Date")),
             "price": (prices or {}).get(code.upper())}
+
+
+def _not_audited(v, not_audited_codes):
+    """True when the row's line item was not audited, i.e. is an Un Verified item (see NOT_AUDITED_EXPECT):
+    its code is in the list the NOT_AUDITED_CHIP chip shows, or, without that list, it meets the chip's rule."""
+    if not_audited_codes is not None:
+        return v["code"].upper() in not_audited_codes
+    return bool(_calc(CHIP_RULES[NOT_AUDITED_CHIP], **v))
 
 
 def _parse_date(text, fmt):
@@ -1378,7 +1469,7 @@ class _UIChecks:
         self.add(group, check, None, "-", why, status="NOT RUN")
 
 
-def _ui_write_report(checks, folder, config):
+def _ui_write_report(checks, folder, config, name="Summary_UI_Validation.xlsx"):
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Font, PatternFill
     fills = {"PASS": "C6EFCE", "FAIL": "FFC7CE", "KNOWN": "FCE4D6", "NOT RUN": "D9D9D9"}
@@ -1406,7 +1497,7 @@ def _ui_write_report(checks, folder, config):
             sheet.column_dimensions[col[0].column_letter].width = min(max(10, max(len(str(x.value or "")) for x in col) + 2), 70)
             for x in col:
                 x.alignment = Alignment(wrap_text=True, vertical="top")
-    path = os.path.join(folder, "Summary_UI_Validation.xlsx")
+    path = os.path.join(folder, name)
     wb.save(path)
     return path
 
@@ -1464,6 +1555,7 @@ def _check_counts(ck, st, page):
             continue
         try:
             listed, note = _ui_rows_retry(page, st, lambda: _ui_chip(page, label), chips[label] > 0)
+            st.setdefault("chip_lists", {})[field] = {_row_vals(r)["code"].upper() for r in listed}
             actual = f"{len(listed)} row(s): {[_row_vals(r)['code'] for r in listed][:15]}{note}"
             known = CHIP_LIST_DIFFS.get(field)
             names = {"count": chips[label], "listed": len(listed),
@@ -1503,9 +1595,11 @@ def _check_table(ck, st):
     missing = [f for f in REQUIRED_FIELDS[group] if _find(f, heads) is None]
     ck.add(group, "All table fields shown", not missing, ", ".join(REQUIRED_FIELDS[group]),
            f"missing={missing}; order on screen: {heads}")
-    for field, rule in ROW_FORMULAS.items():
+    not_audited_codes = (st.get("chip_lists") or {}).get(NOT_AUDITED_CHIP)
+    audited_rows = [r for r in st["rows"] if not _not_audited(_row_vals(r), not_audited_codes)]
+    for field, rule in ROW_FORMULAS.items():           # variance formulas: audited line items only
         bad, checked = [], 0
-        for r in st["rows"]:
+        for r in audited_rows:
             v = _row_vals(r, st["prices"])
             if "price" in rule and v["price"] is None:
                 continue
@@ -1523,6 +1617,31 @@ def _check_table(ck, st):
     bad = [f"{_row_vals(r)['code']}: {_cell(r, 'Audited Date')!r}" for r in st["rows"]
            if _blank(_cell(r, "Audited Date")) and not _parse_date(_cell(r, "Audited Date"), fmt)]
     ck.add(group, f"Audited Date format {fmt}", not bad, fmt, "; ".join(bad[:8]) or "all dates match")
+    _check_not_audited(ck, st, audited_rows)
+
+
+def _check_not_audited(ck, st, audited_rows):
+    """User rule: line items that were not audited (Un Verified) show no audit details and no variance;
+    audited ones do."""
+    group = "Not Audited Items"
+    listed = (st.get("chip_lists") or {}).get(NOT_AUDITED_CHIP)
+    source = (f"the rows the {NOT_AUDITED_CHIP} chip lists" if listed is not None
+              else f"rows meeting {CHIP_RULES[NOT_AUDITED_CHIP]}")
+    not_audited = [r for r in st["rows"] if r not in audited_rows]
+    codes = [_row_vals(r)["code"] for r in not_audited]
+    ck.add(group, "Line items that were not audited", True, source, f"{len(codes)} item(s): {codes[:20]}",
+           status="PASS" if codes else "NOT RUN")
+    for field, (rule, finding) in NOT_AUDITED_EXPECT.items():
+        if not not_audited:
+            break
+        bad = [f"{_row_vals(r)['code']}: {_cell(r, field)!r}" for r in not_audited if not _calc(rule, **_row_vals(r))]
+        ck.add(group, f"Not audited: {field} ({rule})", not bad, f"{len(not_audited)} row(s) meet it",
+               "; ".join(bad[:10]) or f"{len(not_audited)} row(s) meet it",
+               finding=f"spec {finding}" if bad and finding else "")
+    for field, rule in AUDITED_EXPECT.items():
+        bad = [f"{_row_vals(r)['code']}: {_cell(r, field)!r}" for r in audited_rows if not _calc(rule, **_row_vals(r))]
+        ck.add(group, f"Audited: {field} shown ({rule})", not bad, f"{len(audited_rows)} row(s) meet it",
+               "; ".join(bad[:10]) or f"{len(audited_rows)} row(s) meet it")
 
 
 def _check_options(ck, st, page):
@@ -1579,11 +1698,13 @@ def _check_options(ck, st, page):
             ck.add(group, f"{option}: rows add up to the Item view per item", not bad,
                    f"stock {spec['stock']}, audited and damaged summed", "; ".join(bad[:6]) or f"{len(per)} item(s) match")
             bad = []
-            for r in unit_rows:
+            for r in unit_rows:                          # not audited line items: variance 0 (NOT_AUDITED_EXPECT)
                 v = _row_vals(r, st["prices"])
-                if not _near(v["variance"], _calc(ROW_FORMULAS["Variance"], **v)):
-                    bad.append(f"{v['code']}: {v['variance']:g}")
-            ck.add(group, f"{option}: Variance = {ROW_FORMULAS['Variance']} on every row", not bad,
+                not_audited = _not_audited(v, (st.get("chip_lists") or {}).get(NOT_AUDITED_CHIP))
+                want = 0 if not_audited else _calc(ROW_FORMULAS["Variance"], **v)
+                if not _near(v["variance"], want):
+                    bad.append(f"{v['code']}: {v['variance']:g} vs {want:g}")
+            ck.add(group, f"{option}: Variance = {ROW_FORMULAS['Variance']} (audited) / 0 (not audited)", not bad,
                    "every row", "; ".join(bad[:6]) or f"{len(unit_rows)} row(s) match")
     except Exception as e:
         ck.error(group, "Summarize As options", e)
@@ -1750,14 +1871,109 @@ def _check_findings(ck, st):
 
 
 # ----------------------------------------------------------------------
+# Move to Not Found (Complete Audit popup) — changes the audit
+# ----------------------------------------------------------------------
+def _named_chips(chips):
+    """{required chip name: count} for the chips of REQUIRED_FIELDS (labels matched like everywhere else)."""
+    out = {}
+    for name in REQUIRED_FIELDS["Audit Summary Counts"]:
+        label = _find(name, list(chips))
+        if label is not None:
+            out[name] = chips[label]
+    return out
+
+
+def _check_moved_rows(ck, group, moved, rows_after, completer, expect=None):
+    """Every row of the step-2 items against expect (default MOVE_NOT_FOUND_EXPECT; pure: tested offline)."""
+    for field, (ok_rule, known_rule, finding) in (expect or MOVE_NOT_FOUND_EXPECT).items():
+        bad, known = [], []
+        for code in moved:
+            r = rows_after.get(code.upper())
+            if r is None:
+                bad.append(f"{code}: row missing after the move")
+                continue
+            v = dict(_row_vals(r), resolution_status=_blank(_cell(r, "Resolution Status")), completer=completer)
+            if _calc(ok_rule, **v):
+                continue
+            (known if known_rule and _calc(known_rule, **v) else bad).append(f"{code}: {_cell(r, field)!r}")
+        status = "FAIL" if bad else "KNOWN" if known else "PASS"
+        ck.add(group, f"Step-2 items: {field} ({ok_rule})", not bad, f"{len(moved)} row(s) meet it",
+               "; ".join((bad or known)[:10]) + (f" (known: {known_rule})" if known and not bad else "")
+               or f"{len(moved)} row(s) meet it",
+               status=status, finding=f"spec {finding}" if (bad or known) and finding else "")
+
+
+def check_move_to_not_found(page, config, folder=None) -> bool:
+    """Complete Audit > Yes > "Unverified items" step with config.complete_choice ("Move to Not Found" or
+    "Keep as Unverified") > Proceed to Resolution on config.ap_audit_name, then check the popup count, the
+    chips and every step-2 item against UNVERIFIED_CHOICE_RULES[choice] (spec 03 §3.1-3.2).
+    CHANGES THE AUDIT: it goes In Resolution (with Move to Not Found the Un Verified items become Not Found)."""
+    from audit.complete_audit_popup import _enter_resolution      # imported here: that module imports this one
+    from audit.stock_audit_checks import Results
+    audit = config.ap_audit_name
+    choice = getattr(config, "complete_choice", "Move to Not Found")
+    if choice not in UNVERIFIED_CHOICE_RULES:
+        raise ValueError(f"complete_choice {choice!r} is not one of {list(UNVERIFIED_CHOICE_RULES)}")
+    chip_rules, row_rules = UNVERIFIED_CHOICE_RULES[choice]
+    folder = folder or os.path.join(getattr(config, "e2e_output_dir", os.getcwd()),
+                                    f"Summary_{_key(choice)}_{audit}_{datetime.now():%m%d_%H%M}")
+    os.makedirs(folder, exist_ok=True)
+    section(f"UNVERIFIED ITEMS: {choice.upper()}  >  {audit}")
+    group, ck = f"Unverified step: {choice}", _UIChecks(page, folder)
+    try:
+        _ui_open_summary(page, config)
+        _ui_summarize(page, "Item")
+        _ui_chip(page, "All")
+        before = _named_chips(_ui_chips(page))
+        status = _ui_tiles(page).get("Status", "")
+        _ui_chip(page, _find(NOT_AUDITED_CHIP, list(_ui_chips(page))))
+        moved = [_row_vals(r)["code"] for r in _ui_all_rows(page)]
+        _ui_chip(page, "All")
+        name = page.locator(".profile-name").first
+        completer = _txt(name.text_content()) if name.count() else ""
+        print(f"   before: status={status}, chips={before}, Un Verified items={moved}, completer={completer!r}")
+        if not moved:
+            ck.not_run(group, choice, f"no Un Verified item, so no 'Unverified items' step (status {status})")
+        else:
+            res, flow = Results(), {}
+            _enter_resolution(page, config, res, flow)
+            popup = flow.get("unverified")
+            ck.add(group, "Unverified step: 'There are N items not counted' = Un Verified items",
+                   popup is not None and _calc(MOVE_NOT_FOUND_POPUP, popup=popup, before=before),
+                   f"N = {before.get('Unverified')} ({MOVE_NOT_FOUND_POPUP})",
+                   f"N = {popup}; choice {choice!r}; popup steps: {[row[1] for row in res.rows]}")
+            _ui_open_summary(page, config)
+            _ui_summarize(page, "Item")
+            _ui_chip(page, "All")
+            after_status = _ui_tiles(page).get("Status", "")
+            ck.add(group, f"Status after Proceed to Resolution = {MOVE_NOT_FOUND_STATUS}",
+                   after_status == MOVE_NOT_FOUND_STATUS, MOVE_NOT_FOUND_STATUS, after_status)
+            after = _named_chips(_ui_chips(page))
+            for chip, rule in chip_rules.items():
+                want = _calc(rule, before=before, moved=len(moved))
+                ck.add(group, f"{chip} chip after '{choice}' = {rule}", after.get(chip) == want, want,
+                       f"{after.get(chip)} (before {before.get(chip)}, step-2 items {len(moved)})")
+            rows_after = {_row_vals(r)["code"].upper(): r for r in _ui_all_rows(page)}
+            _check_moved_rows(ck, group, moved, rows_after, completer, row_rules)
+    except Exception as e:
+        ck.error(group, choice, e)
+    path = _ui_write_report(ck, folder, config, name=f"Unverified_{_key(choice)}.xlsx")
+    counts = Counter(r["Status"] for r in ck.rows)
+    print("\n" + "=" * 70 + f"\n  UNVERIFIED ITEMS: {choice.upper()} — {audit}\n" + "=" * 70)
+    print(f"  {dict(counts)}   report: {path}")
+    return counts.get("FAIL", 0) == 0
+
+
+# ----------------------------------------------------------------------
 # entry point
 # ----------------------------------------------------------------------
-def validate_summary_ui(page, config) -> bool:
+def validate_summary_ui(page, config, folder=None) -> bool:
     """Validate the Audit Summary page of config.ap_audit_name from the UI against the data block above.
-    Read-only: nothing that changes the audit is clicked. Writes Summary_UI_Validation.xlsx."""
+    Read-only: nothing that changes the audit is clicked. Writes Summary_UI_Validation.xlsx into folder
+    (default: a new Summary_UI_<audit>_<time> folder in config.e2e_output_dir, the report folder)."""
     audit = config.ap_audit_name
-    folder = os.path.join(getattr(config, "e2e_output_dir", os.getcwd()),
-                          f"Summary_UI_{audit}_{datetime.now():%m%d_%H%M}")
+    folder = folder or os.path.join(getattr(config, "e2e_output_dir", os.getcwd()),
+                                    f"Summary_UI_{audit}_{datetime.now():%m%d_%H%M}")
     os.makedirs(folder, exist_ok=True)
     section(f"AUDIT SUMMARY UI VALIDATION  >  {audit}")
     ck, st = _UIChecks(page, folder), {"audit": audit, "config": config, "prices": {}, "sheets": {}, "export_path": None}

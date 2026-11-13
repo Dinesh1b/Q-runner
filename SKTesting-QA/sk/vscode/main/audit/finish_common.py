@@ -92,15 +92,29 @@ def _list_status(page, Config, tab, audit_type="Complete Count"):
 # --------------------------------------------------------------
 # UI HELPERS
 # --------------------------------------------------------------
-def _pick(page, dropdown, text) -> bool:
-    dropdown.click()
-    option = page.locator(".p-dropdown-panel:visible li.p-dropdown-item", has_text=text)
-    if option.count() == 0:
-        page.keyboard.press("Escape")
-        return False
-    option.first.click()
-    page.wait_for_timeout(500)
-    return True
+def _pick(page, dropdown, text, tries=3) -> bool:
+    """Open a PrimeNG dropdown and pick the option with text; False when the option is not offered.
+    The resolution table re-renders after each change and scrolls inside its own box, so a click can time
+    out: each try closes any open panel, scrolls the dropdown into view and clicks again."""
+    last = None
+    for _ in range(tries):
+        try:
+            page.keyboard.press("Escape")
+            dropdown.scroll_into_view_if_needed(timeout=5000)
+            dropdown.click(timeout=10000)
+            panel = page.locator(".p-dropdown-panel:visible").last
+            panel.wait_for(state="visible", timeout=5000)
+            option = panel.locator("li.p-dropdown-item", has_text=text)
+            if option.count() == 0:
+                page.keyboard.press("Escape")
+                return False
+            option.first.click(timeout=5000)
+            page.wait_for_timeout(500)
+            return True
+        except Exception as e:
+            last = e
+            page.wait_for_timeout(1500)
+    raise last
 
 
 def _row(page, scope, code):

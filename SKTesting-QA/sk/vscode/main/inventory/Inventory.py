@@ -19,21 +19,21 @@ from backend.Config import Config as GroupConfig
 class Config:
 
         # ── Conditional Login Control ─────────────────────────────
-    USE_CUSTOM_LOGIN = False
+    USE_CUSTOM_LOGIN = True
 
     if USE_CUSTOM_LOGIN:
-        email = "rakeikoppanna-7429@yopmail.com"
-        password = "MeNx6G2S"
+        email = "laveuheizaku-2683@yopmail.com"
+        password = "12345678"
     else:
         email = None
         password = None
 
     browsername = "chrome"
-    environments = "production" # production, staging, development
+    environments = "staging" # production, staging, development
 
-    Branch = "gr"
-    run_create_group = False
-    run_update_group = True     # update the saved group named group_name so it matches backend/Config.py
+    Branch = "DE"
+    run_create_group = False    # QA_GRP_1112_2214 (Unit) was created on staging on 11-12 22:15
+    run_update_group = False    # update the saved group named group_name so it matches backend/Config.py
     run_location_setup = False
     zones  = ["SA"]
     aisles = ["A1", "A2", "A3"]
@@ -46,26 +46,26 @@ class Config:
     sheet_name = "Data"
 
 #itme itme imports
-    run_import_app = False
+    run_import_app = True
 
     EXCEL_FILE: str = os.environ.get(
         "IMPORT_EXCEL_FILE",
-        r"C:\Users\dines\3D Objects\main_qexcel.xlsx"  
-        #r"C:\Users\HP\Documents\input\main_qexcel.xlsx"
+        r"C:\Users\HP\Videos\main_qexcel.xlsx"
+        #r"C:\Users\dines\3D Objects\main_qexcel.xlsx"
     )
-    run_add_item = False
-    
-    run_import_items = False
-    
+    run_add_item = True          # ITM0039: in the group, not on sheet Data -> the audit's excess item
+
+    run_import_items = True      # sheet Data: ITM0001-ITM0010
+
     # --- Add Item test record (single item, not from Excel) ---
-    Item_Name     = "ab,cm12"    # Item Name   (was wrongly used as UOM before)
-    Item_Code     = "itme173"    # Item Code
-    Item_UOM      = "km"         # UOM         (was wrongly used as Item Name before)
-    Item_Category = "Category132!" # Category
+    Item_Name     = "Item 039"   # Item Name   (was wrongly used as UOM before)
+    Item_Code     = "ITM0039"    # Item Code
+    Item_UOM      = "kg"         # UOM         (was wrongly used as Item Name before)
+    Item_Category = "GMA"        # Category
     Item_Tag      = "test tag1"   # Tag
     Item_CP       = 100          # Cost Price  (was hardcoded "100" in script, ignored Config)
     Item_SP       = 150          # Sell Price  (was hardcoded "150" in script, ignored Config)
-    Item_Barcode  = "1234u56789"  # EAN/QR
+    Item_Barcode  = "890000000039"  # EAN/QR
     Item_Description  = ""        # Optional
     Item_TaxHsn       = ""        # Optional
     Item_Tax          = ""        # Optional

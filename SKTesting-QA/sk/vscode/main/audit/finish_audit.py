@@ -59,8 +59,9 @@ def step_declaration(page, Config, res, plan, st):
     page.reload()
     page.wait_for_selector("app-audit-stock-v2 header.asv2-toolbar", timeout=30000)
     page.wait_for_timeout(2000)
-    # After Finish Audit the audit itself stays IN PROGRESS (it closes at Complete Audit);
-    # the finished count shows as the Finish button turning disabled.
+    # After Finish Audit the auditor's own status stays IN PROGRESS, with one or two auditors; COMPLETED belongs
+    # only to after Complete Audit, when the audit is In Resolution (user, 2026-11-13). The finished count
+    # shows as the Finish button turning disabled.
     status = _clean(page.locator("app-audit-stock-v2 .asv2-status-value").inner_text())
     finish_off = page.locator(FINISH_BTN).is_disabled()
     res.check(area, "Count finished (status IN PROGRESS, Finish disabled)",

@@ -9,7 +9,9 @@ Nothing irreversible is clicked: Finish audit only opens the declaration
 page (no notes chosen, the final "Finish Audit" button is not pressed), and
 Complete Audit, Archive, Export, Print and row Delete are never clicked.
 """
+import os
 import re
+import traceback
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -57,7 +59,11 @@ class Results:
         try:
             fn(*args)
         except Exception as e:
-            self.check(area, "section ran", False, f"error: {str(e).splitlines()[0][:160]}")
+            hint = next((l.strip() for l in str(e).splitlines() if any(k in l for k in (
+                "intercepts pointer", "not stable", "not visible", "outside of the viewport", "detached",
+                "not enabled"))), "")
+            self.check(area, "section ran", False, f"error: {str(e).splitlines()[0][:160]}{_where(e)}"
+                       + (f" ({hint[:140]})" if hint else ""))
 
     def report(self, title: str = "STOCK AUDIT v2 — FEATURE / CROSS-CHECK SUMMARY") -> bool:
         passed = sum(1 for r in self.rows if r[2])
@@ -78,6 +84,16 @@ class Results:
 # --------------------------------------------------------------
 # SMALL HELPERS
 # --------------------------------------------------------------
+def _where(e) -> str:
+    """' at file.py:line <code>' of the last frame in the audit folder (where a step failed), or ''."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    frames = [f for f in traceback.extract_tb(e.__traceback__) if os.path.abspath(f.filename).startswith(here)]
+    if not frames:
+        return ""
+    f = frames[-1]
+    return f" at {os.path.basename(f.filename)}:{f.lineno} {(f.line or '').strip()[:90]}"
+
+
 def _num(text) -> float:
     s = str(text or "").replace(",", "").strip()
     m = re.match(r"^[-+]?\d+(\.\d+)?", s)       # resolution pages show "+3"

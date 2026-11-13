@@ -31,10 +31,12 @@ def step_resolution_actions(page, Config, res, plan, st):
             res.check(area, f"{code} variance value = variance x cost price",
                       _num(r[idx["VARIANCE VALUE"]]) == want,
                       f"page={r[idx['VARIANCE VALUE']]} expected={r[idx['VARIANCE']]} x {cost:g} = {want:g}")
+        # The declared note is not preselected on the resolution page: "Select" is correct (user, 2026-11-13)
         declared = st.get("declared", {}).get(code)
         if declared:
-            res.check(area, f"{code} declaration note carried over", r[idx["DECLARATION NOTE"]] == declared,
-                      f"declared={declared!r} page={r[idx['DECLARATION NOTE']]!r}")
+            shown = _clean(r[idx["DECLARATION NOTE"]])
+            res.check(area, f"{code} declaration note not preselected (Select)", shown in ("Select", "", "-"),
+                      f"declared={declared!r} page={shown!r}")
 
     st["actions"] = {}
     for code in codes:

@@ -290,7 +290,16 @@ def select_navigation_option(page, option_name: str):
     """
     option_name: one of 'Stock Audit', 'Audit Summary', 'Settings'
     """
-    page.wait_for_selector("div[role='dialog'][aria-labelledby='auditNavTitle']")
+    dialog = page.locator("div[role='dialog'][aria-labelledby='auditNavTitle']")
+    try:
+        dialog.first.wait_for(state="visible", timeout=15000)
+    except Exception:
+        # A user who is only an auditor (not the owner) goes straight to the Stock Audit page: no choice dialog
+        landed = {"Stock Audit": "/stock", "Audit Summary": "/auditSummary"}.get(option_name)
+        if landed and landed in page.url:
+            print(f"   No choice dialog: {option_name} opened directly")
+            return
+        raise
 
     card = page.locator(
         f"button.create-type-card:has(h6.create-type-card__title:text-is('{option_name}'))"
