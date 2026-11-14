@@ -20,6 +20,8 @@ BIZ RULES:
 import math
 import os
 import re
+import shutil
+import subprocess
 import sys
 import zlib
 from collections import Counter, OrderedDict, defaultdict
@@ -756,6 +758,7 @@ LABEL_ALIASES = {
     "Audited Quantity": ["Audited"],
     "Damaged Quantity": ["Damaged"],
     "Copy Table": ["Copy table — paste into Excel"],
+    "UOM (Primary)": ["UOM (Base)", "UOM"],
 }
 SPLIT_TILES = {"Frequency - Mapping Type": ("Frequency", "Mapping Type")}     # one tile, two fields
 STATUS_LABELS = ["Not Started", "Stock Sheet Updated", "In Progress", "In Resolution", "Completed",
@@ -1008,7 +1011,10 @@ def _row_vals(r, prices=None):
 
 def _not_audited(v, not_audited_codes):
     """True when the row's line item was not audited, i.e. is an Un Verified item (see NOT_AUDITED_EXPECT):
-    its code is in the list the NOT_AUDITED_CHIP chip shows, or, without that list, it meets the chip's rule."""
+    its code is in the list the NOT_AUDITED_CHIP chip shows, or, without that list, it meets the chip's rule.
+    In location-split views, a row with audited == 0 and no auditor is an uncounted (unverified) location row."""
+    if v.get("audited") == 0 and not v.get("auditor"):
+        return True
     if not_audited_codes is not None:
         return v["code"].upper() in not_audited_codes
     return bool(_calc(CHIP_RULES[NOT_AUDITED_CHIP], **v))
@@ -1752,40 +1758,6 @@ def _check_actions(ck, st, page):
             _ui_close_menu(page)
 
 
-def _check_pdf(ck, st, page, label, pools):
-    group, codes = "Actions", sorted({_row_vals(r)["code"] for r in st["rows"]})
-    sources = [("table button", lambda: pools["table"][label].click())]
-    menu_label = _find("Download PDF", list(pools["menu"]))
-    if menu_label:
-        def from_menu():
-            page.locator(f"{UI_SUMMARY} button.dots-btn").first.click()
-            page.wait_for_timeout(800)
-            page.locator(f"{UI_SUMMARY} .dropdown-container").first.locator(
-                "button, a, li", has_text=re.compile(rf"^\s*{re.escape(menu_label)}\s*$")).first.click()
-        sources.append(("⋮ menu", from_menu))
-    for where, click in sources:
-        with page.expect_download(timeout=90000) as info:
-            click()
-        path = os.path.join(ck.folder, f"Audit_Summary_{_key(where)}.pdf")
-        info.value.save_as(path)
-        data = open(path, "rb").read()
-        text = _ui_pdf_text(data)
-        found = [x for x in codes if x in text]
-        is_pdf = data[:5] == b"%PDF-"
-        if is_pdf and not text.strip():
-            ck.add(group, f"Download PDF ({where}) is a PDF", True, "a PDF", f"{len(data)} bytes")
-            ck.not_run(group, f"Download PDF ({where}) lists every item", "PDF text is not readable without a PDF library")
-            continue
-        figures = {k: (m.group(1) if (m := re.search(rx, text)) else "-") for k, rx in PDF_FIGURES.items()}
-        named = st["audit"] in text
-        ck.add(group, f"Download PDF ({where}) is a PDF that names the audit and lists every item",
-               is_pdf and named and len(found) == len(codes),
-               f"a PDF naming {st['audit']} with {len(codes)} item code(s)",
-               f"{len(data)} bytes; audit named={named}; items found {len(found)}/{len(codes)}; "
-               f"missing={[x for x in codes if x not in found][:10]}; PDF figures {figures}")
-        _ui_close_menu(page)
-
-
 def _check_clipboard(ck, st, page, button):
     group = "Actions"
     origin = re.match(r"^https?://[^/]+", page.url).group(0)
@@ -1803,6 +1775,505 @@ def _check_clipboard(ck, st, page, button):
     ck.add(group, "Copy Table copies the header and every row shown", bool(lines) and not lost and len(found) == len(codes),
            f"header with the table fields + {len(codes)} row(s)",
            f"{len(lines)} line(s); rows found {len(found)}/{len(codes)}; header missing={lost}")
+
+
+# ======================================================================
+# PDF CONTENT + EXPORT CONTENT VALIDATION
+# ======================================================================
+
+# ----------------------------------------------------------------------
+# DATA BLOCK — PDF
+# ----------------------------------------------------------------------
+PDF_QTY_TOL = 0.0005           # quantities (4 decimals are printed in the PDF)
+PDF_VALUE_TOL = 0.05           # money
+
+# Sections of "Verified Items (Counted)". heading: regex whose group 1 is the (N) count.
+# rule: which UI rows belong in it. Names: as _pdf_vals() (stock, audited, variance, resolution_status ...)
+PDF_SECTIONS = OrderedDict([
+    ("Accepted", {"heading": r"Variance Resolved.{0,6}?Accepted\s*\((\d+)\)",
+                  "rule": "resolution_status in ('Accepted', 'Recount Accepted')", "status_col": True}),
+    ("Investigate", {"heading": r"Variance Unresolved.{0,6}?Investigate\s*\((\d+)\)",
+                     "rule": "resolution_status == 'Under Investigation'", "status_col": True}),
+    ("Matched", {"heading": r"Matched Items\s*\((\d+)\)",
+                 "rule": "resolution_status == '' and audited == stock", "status_col": False}),
+])
+# Rows of the "Adjustment Report" table (a subset of the Accepted section: only rows that change stock)
+ADJUSTMENT_ROWS = "resolution_status in ('Accepted', 'Recount Accepted') and variance != 0"
+ADJUSTMENT_TYPE_WORD = {1: "Increase", -1: "Decrease"}
+# Counting rules for the header cards
+PDF_COUNTS = OrderedDict([
+    ("stock_lines", "stock > 0"),          # "10 stock lines"
+    ("counted_lines", "auditor != ''"),    # "11 lines counted" (a counted 0 is still counted)
+])
+PDF_SECTION_ENDS = [r"Verified Items \(Counted\)", r"Unverified Items Summary", r"Closure Note"]
+
+
+# ----------------------------------------------------------------------
+# DATA BLOCK — EXPORT (xlsx)
+# ----------------------------------------------------------------------
+# UI field (as in REQUIRED_FIELDS) -> (header in the exported sheet, kind)
+EXPORT_FIELDS = OrderedDict([
+    ("Item Code", ("ItemCode", "text")), ("Item Name", ("ItemName", "text")),
+    ("UOM (Primary)", ("UOM (Base)", "text")), ("Category", ("CategoryName", "text")),
+    ("Stock Quantity", ("StockQty", "num")), ("Audited Quantity", ("AuditedQty", "num")),
+    ("Variance", ("Variance", "num")), ("Variance Value", ("VarianceValue", "money")),
+    ("Variance Type", ("VarianceType", "text")), ("Damaged Qty", ("DamagedQty", "num")),
+    ("Cross Audited Qty", ("CrossAuditedQty", "num")), ("Cross Damaged Qty", ("CrossDamagedQty", "num")),
+    ("Stock Location", ("StockLocation", "text")), ("Audited Location", ("AuditedLocation", "text")),
+    ("Audited Date", ("AuditedDate", "date")), ("Auditor", ("AuditorName", "text")),
+    ("Coordinates", ("Coordinates", "text")), ("Declaration Note", ("DeclarationNote", "text")),
+    ("Remarks", ("Remarks", "text")), ("Resolution Status", ("ResolutionStatus", "text")),
+])
+EXPORT_EXTRA_HEADERS = ["CostPrice", "VarianceHistory"]       # in the file, not a UI column
+EXPORT_DATE_FORMAT = "%m-%d-%Y"
+EXPORT_TOL = {"num": 0.00005, "money": 0.005}                 # export must hold the full precision
+
+
+# ----------------------------------------------------------------------
+# small helpers
+# ----------------------------------------------------------------------
+def _close(a, b, tol):
+    return a is not None and b is not None and abs(float(a) - float(b)) <= tol
+
+
+def _flat(text):
+    """One line of text; − – → -, thousands commas removed (regexes below rely on it)."""
+    t = (text or "").replace("\u2212", "-").replace("\u2013", "-").replace("\u00a0", " ")
+    t = re.sub(r"(?<=\d),(?=\d{3})", "", t)
+    return " ".join(t.split())
+
+
+def _pdf_pages(path, data):
+    """Text of each page. pdftotext -raw (reading order) > pypdf > built-in extractor (one 'page')."""
+    exe = shutil.which("pdftotext")
+    if exe:
+        try:
+            out = subprocess.run([exe, "-raw", path, "-"], capture_output=True, timeout=60).stdout.decode("utf-8", "ignore")
+            pages = out.split("\f")
+            if pages and not pages[-1].strip():
+                pages.pop()
+            if any(p.strip() for p in pages):
+                return pages
+        except Exception:
+            pass
+    try:
+        from pypdf import PdfReader  # type: ignore
+        pages = [p.extract_text() or "" for p in PdfReader(path).pages]
+        if any(p.strip() for p in pages):
+            return pages
+    except Exception:
+        pass
+    text = _ui_pdf_text(data)
+    return [text] if text.strip() else []
+
+
+def _pdf_vals(r, prices=None):
+    v = _row_vals(r, prices)
+    v["resolution_status"] = _blank(_cell(r, "Resolution Status"))
+    return v
+
+
+def _expected_pdf(item_rows):
+    """What the PDF must show, from the Item-view rows (pure: rows in, numbers out)."""
+    vals = [_pdf_vals(r) for r in item_rows]
+    stock_lines = [v for v in vals if _calc(PDF_COUNTS["stock_lines"], **v)]
+    counted = [v for v in vals if _calc(PDF_COUNTS["counted_lines"], **v)]
+    adj = [v for v in vals if _calc(ADJUSTMENT_ROWS, **v)]
+    sections = OrderedDict((k, [v for v in vals if _calc(s["rule"], **v)]) for k, s in PDF_SECTIONS.items())
+    placed = {id(v) for rows in sections.values() for v in rows}
+    inc, dec = [v for v in adj if v["variance"] > 0], [v for v in adj if v["variance"] < 0]
+    return {
+        "items": len({v["code"].upper() for v in vals}),
+        "stock_lines": len({v["code"].upper() for v in stock_lines}),
+        "locations": len({v["stock_location"] for v in stock_lines if v["stock_location"]}),
+        "verified_units": sum(v["audited"] for v in counted), "lines_counted": len(counted),
+        "adj_inc": sum(v["variance"] for v in inc), "adj_dec": -sum(v["variance"] for v in dec),
+        "val_inc": sum(v["variance_value"] for v in inc), "val_dec": -sum(v["variance_value"] for v in dec),
+        "not_counted": sum(1 for v in vals if _calc(CHIP_RULES["Unverified"], **v)),
+        "adj": adj, "sections": sections, "unplaced": [v for v in vals if id(v) not in placed],
+    }
+
+
+def _pdf_after(flat, start_rx, end_rxs):
+    """Text from the end of start_rx to the first of end_rxs (or the end)."""
+    m = re.search(start_rx, flat, re.I)
+    if not m:
+        return None
+    rest, end = flat[m.end():], None
+    for rx in end_rxs:
+        e = re.search(rx, rest, re.I)
+        if e and (end is None or e.start() < end):
+            end = e.start()
+    return rest if end is None else rest[:end]
+
+
+def _pdf_segments(section, codes):
+    """{CODE: text from that code to the next code} inside one section."""
+    pos = sorted((m.start(), c_) for c_ in codes for m in [re.search(re.escape(c_), section, re.I)] if m)
+    out = {}
+    for i, (p, c_) in enumerate(pos):
+        out[c_.upper()] = section[p:pos[i + 1][0] if i + 1 < len(pos) else len(section)]
+    return out
+
+
+def _nums(seg):
+    return [float(x) for x in re.findall(r"[-+]?\d+(?:\.\d+)?", seg)]
+
+
+def _g(flat, rx, n=1):
+    m = re.search(rx, flat, re.I)
+    return m.group(n) if m else None
+
+
+def _strip_page_chrome(page):
+    """A page without the repeated header and the footer."""
+    t = _flat(page)
+    t = re.sub(r"Audit Summary Report Audit Name\s*:\s*\S+", " ", t)
+    t = re.sub(r"Page \d+ of \d+", " ", t)
+    t = re.sub(r"Generated by Stockount\s*\W?\s*\d{1,2}/\d{1,2}/\d{4}\s*\d{1,2}:\d{2}\s*[ap]m", " ", t)
+    return " ".join(t.split())
+
+
+# ----------------------------------------------------------------------
+# PDF content
+# ----------------------------------------------------------------------
+def _check_pdf_content(ck, st, pages, where):
+    group = f"PDF Content ({where})"
+    flat = _flat("\n".join(pages))
+    exp = _expected_pdf(st["rows"])
+    tiles = st.get("tiles") or {}
+    tile = lambda f: tiles.get(_find(f, list(tiles)) or "", "")
+    add = lambda check, ok, want, got, **kw: ck.add(group, check, ok, want, got, **kw)
+
+    # ---- header -------------------------------------------------------
+    name = _g(flat, r"Audit Name\s*:\s*(\S+)")
+    add("Audit Name = the audit", name == st["audit"], st["audit"], name)
+    d = _g(flat, r"AUDIT DATE\s*(\d{1,2}/\d{1,2}/\d{4})")
+    t = _g(flat, r"AUDIT DATE\s*\d{1,2}/\d{1,2}/\d{4}\s*(\d{1,2}:\d{2}\s*[ap]m)")
+    ui_when = _parse_date(tile("Date & Time"), DATE_FORMATS["Date & Time"])
+    try:
+        pdf_when = datetime.strptime(f"{d} {t.upper()}", "%d/%m/%Y %I:%M %p") if d and t else None
+    except ValueError:
+        pdf_when = None
+    if ui_when is None:
+        ck.not_run(group, "Audit Date = Date & Time tile", "tile not read")
+    else:
+        add("Audit Date = Date & Time tile", bool(pdf_when) and abs((pdf_when - ui_when).total_seconds()) <= 60,
+            ui_when.strftime("%d/%m/%Y %I:%M %p").lower(), f"{d} {t}")
+    tile_auditors = sorted(a.strip() for a in (tile("Auditor(s)") or tile("Auditor") or "").split(",") if a.strip())
+    ui_auditors = tile_auditors if tile_auditors else sorted({v["auditor"] for v in map(_pdf_vals, st["rows"]) if v["auditor"]})
+    pdf_auditors = sorted(a.strip() for a in (_g(flat, r"AUDITORS\s*(.+?)\s*Audit Summary") or "").split(",") if a.strip())
+    add("Auditors = tile or report rows", pdf_auditors == ui_auditors or pdf_auditors == sorted({v["auditor"] for v in map(_pdf_vals, st["rows"]) if v["auditor"]}), ui_auditors, pdf_auditors)
+    pdf_type = _g(flat, r"AUDIT TYPE\s*(.+?)\s*ITEMS INVOLVED")
+    if tile("Audit Type"):
+        want_type = tile("Audit Type")
+        ok_type = _key(want_type) in _key(pdf_type) if pdf_type else False
+        add("Audit Type = tile", ok_type, want_type, pdf_type)
+    m = re.search(r"ITEMS INVOLVED\s*(\d+)\s*(\d+) stock lines?\s*\W{0,3}\s*(\d+) locations?", flat, re.I)
+    got = tuple(int(x) for x in m.groups()) if m else None
+    add("Items involved / stock lines / locations", got == (exp["items"], exp["stock_lines"], exp["locations"]),
+        (exp["items"], exp["stock_lines"], exp["locations"]), got)
+    m = re.search(r"VERIFIED \(COUNTED\)\s*([\d.]+)\s*units\s*(\d+) lines counted", flat, re.I)
+    add("Verified (counted) units and lines", bool(m) and _close(m.group(1), exp["verified_units"], PDF_QTY_TOL)
+        and int(m.group(2)) == exp["lines_counted"], f"{exp['verified_units']:g} units, {exp['lines_counted']} lines",
+        f"{m.group(1)} units, {m.group(2)} lines" if m else None)
+    cards = st.get("qty") or {}
+    if "Audited" in cards:
+        add("Verified units = Audited Quantity card", bool(m) and _close(m.group(1), cards["Audited"], TOLERANCE),
+            cards["Audited"], m.group(1) if m else None)
+    m = re.search(r"ADJUSTED QTY\s*\+([\d.]+)\s*-([\d.]+)\s*Net\s*([-+]?[\d.]+)\s*units", flat, re.I)
+    want = (exp["adj_inc"], exp["adj_dec"], exp["adj_inc"] - exp["adj_dec"])
+    add("Adjusted Qty  +increase  -decrease  net",
+        bool(m) and all(_close(a, b, PDF_QTY_TOL) for a, b in zip(m.groups(), want)),
+        "+%g -%g net %g" % want, "+%s -%s net %s" % m.groups() if m else None)
+    m = re.search(r"ADJUSTMENT VALUE\s*\+([\d.]+)\s*-([\d.]+)", flat, re.I)
+    want = (exp["val_inc"], exp["val_dec"])
+    add("Adjustment Value  +increase  -decrease",
+        bool(m) and all(_close(a, b, PDF_VALUE_TOL) for a, b in zip(m.groups(), want)),
+        "+%g -%g" % want, "+%s -%s" % m.groups() if m else None)
+
+    # ---- adjustment report -------------------------------------------
+    sec = _pdf_after(flat, r"Adjustment Report", PDF_SECTION_ENDS[:1])
+    if sec is None:
+        add("Adjustment Report section shown", False, "shown", "MISSING")
+    else:
+        segs = _pdf_segments(sec, [v["code"] for v in exp["adj"]])
+        lost = [v["code"] for v in exp["adj"] if v["code"].upper() not in segs]
+        extra = sorted(set(re.findall(r"\b[A-Z]{2,}\d+\b", sec)) - {v["code"].upper() for v in exp["adj"]})
+        add("Adjustment Report lists exactly the adjusted rows", not lost and not extra,
+            [v["code"] for v in exp["adj"]], f"missing={lost} extra={extra}")
+        bad = {"Adj. Qty": [], "Adj. Value": [], "Type": [], "Loc": [], "Stock Qty": []}
+        for v in exp["adj"]:
+            seg = segs.get(v["code"].upper())
+            if seg is None:
+                continue
+            ns = _nums(seg)
+            if not any(_close(n, v["variance"], PDF_QTY_TOL) for n in ns):
+                bad["Adj. Qty"].append(f"{v['code']}: want {v['variance']:+g} in {seg[:70]!r}")
+            if not any(_close(n, v["variance_value"], PDF_VALUE_TOL) for n in ns):
+                bad["Adj. Value"].append(f"{v['code']}: want {v['variance_value']:+g}")
+            word = ADJUSTMENT_TYPE_WORD[1 if v["variance"] > 0 else -1]
+            if word.lower() not in seg.lower():
+                bad["Type"].append(f"{v['code']}: want {word}")
+            if v["stock_location"] and v["stock_location"] not in seg:
+                bad["Loc"].append(f"{v['code']}: want {v['stock_location']}")
+            if not any(_close(n, v["stock"], PDF_QTY_TOL) for n in ns):
+                bad["Stock Qty"].append(f"{v['code']}: want {v['stock']:g}")
+        for col, items in bad.items():
+            add(f"Adjustment Report: {col} per row", not items, f"{len(exp['adj'])} row(s) match", "; ".join(items[:8]) or "match")
+        m = re.search(r"TOTAL\s*([\d.]+)\s*([\d.]+)", sec)
+        want = (sum(abs(v["variance"]) for v in exp["adj"]), sum(abs(v["variance_value"]) for v in exp["adj"]))
+        add("Adjustment Report TOTAL = Σ|adj. qty|, Σ|adj. value|",
+            bool(m) and _close(m.group(1), want[0], PDF_QTY_TOL) and _close(m.group(2), want[1], PDF_VALUE_TOL),
+            "%g / %g" % want, "%s / %s" % m.groups() if m else None)
+
+    # ---- verified items sections -------------------------------------
+    heads = [(k, re.search(s["heading"], flat, re.I)) for k, s in PDF_SECTIONS.items()]
+    stops = [m_.start() for _, m_ in heads if m_] + [m_.start() for rx in PDF_SECTION_ENDS[1:]
+                                                       for m_ in [re.search(rx, flat, re.I)] if m_]
+    for key, m_ in heads:
+        rows = exp["sections"][key]
+        if m_ is None:
+            add(f"Section '{key}' shown", not rows, f"{len(rows)} row(s)", "heading not in the PDF")
+            continue
+        add(f"Section '{key}' count (N) = rows meeting its rule", int(m_.group(1)) == len(rows),
+            f"{len(rows)} ({PDF_SECTIONS[key]['rule']})", m_.group(1))
+        end = min([s for s in stops if s > m_.start()] or [len(flat)])
+        seg_all = flat[m_.end():end]
+        segs = _pdf_segments(seg_all, [v["code"] for v in rows])
+        problems = []
+        for v in rows:
+            seg = segs.get(v["code"].upper())
+            if seg is None:
+                problems.append(f"{v['code']}: not listed")
+                continue
+            ns = _nums(seg)
+            miss = []
+            if not any(_close(n, v["audited"], PDF_QTY_TOL) for n in ns):
+                miss.append(f"audited {v['audited']:g}")
+            if not any(_close(n, v["variance"], PDF_QTY_TOL) for n in ns):
+                miss.append(f"variance {v['variance']:+g}")
+            for loc in (v["stock_location"], v["audited_location"]):
+                if loc and loc not in seg:
+                    miss.append(f"location {loc}")
+            if PDF_SECTIONS[key]["status_col"] and v["resolution_status"] not in seg:
+                miss.append(f"status {v['resolution_status']}")
+            if miss:
+                problems.append(f"{v['code']}: missing {', '.join(miss)}")
+        add(f"Section '{key}': every row correct", not problems, f"{len(rows)} row(s) match",
+            "; ".join(problems[:8]) or f"{len(rows)} row(s) match")
+    add("Every report row is in a section", not exp["unplaced"], "none left out",
+        [f"{v['code']} (status {v['resolution_status'] or '-'})" for v in exp["unplaced"]] or "none left out")
+
+    # ---- unverified summary ------------------------------------------
+    m = re.search(r"ITEMS ASSIGNED\s*(\d+)\s*COUNTED\s*(\d+)\s*NOT COUNTED \(UNVERIFIED\)\s*(\d+)", flat, re.I)
+    want = (exp["items"], exp["lines_counted"], exp["not_counted"])
+    got = tuple(int(x) for x in m.groups()) if m else None
+    add("Unverified Items Summary: assigned / counted / not counted", got == want, want, got)
+
+    # ---- closure note and footer -------------------------------------
+    note_want = getattr(st["config"], "closure_note", None) or getattr(st["config"], "fc_closure_note", None)
+    pages_clean = [_strip_page_chrome(p) for p in pages]
+    idx = next((i for i, p in enumerate(pages_clean) if "Closure Note" in p), None)
+    if idx is None:
+        add("Closure Note section shown", False, "shown", "MISSING")
+    else:
+        after = pages_clean[idx].split("Closure Note", 1)[1].strip()
+        note_page = idx
+        if not after and idx + 1 < len(pages_clean):
+            after, note_page = pages_clean[idx + 1].strip(), idx + 1
+        add("Closure Note has text", bool(after), "the note typed at Complete Audit", after[:120] or "EMPTY")
+        if note_want:
+            add("Closure Note = the note entered", _key(note_want) in _key(after), note_want, after[:120])
+        if len(pages_clean) > 1:
+            add("Closure Note heading and its text are on the same page", note_page == idx,
+                "same page", f"heading on page {idx + 1}, text on page {note_page + 1}")
+    n = len(pages)
+    gen = re.findall(r"Generated by Stockount\s*\W?\s*\d{1,2}/\d{1,2}/\d{4}\s*\d{1,2}:\d{2}\s*[ap]m", flat, re.I)
+    foot = [(int(a), int(b)) for a, b in re.findall(r"Page (\d+) of (\d+)", flat)]     # either order of the two footer parts
+    add("Footer 'Generated by Stockount · date · Page i of N' on every page",
+        len(foot) == n == len(gen) and [f[0] for f in foot] == list(range(1, n + 1)) and all(f[1] == n for f in foot),
+        f"{n} page(s): Page 1 of {n} ... Page {n} of {n}, each with a 'Generated by' line",
+        f"pages {foot or 'none'}, generated lines {len(gen)}")
+    add("Audit Name in the header of every page", len(re.findall(r"Audit Name\s*:\s*" + re.escape(st["audit"]), flat)) == n,
+        f"{n}x {st['audit']}", len(re.findall(r"Audit Name\s*:\s*" + re.escape(st["audit"]), flat)))
+
+
+def _pdf_signature(pages):
+    """The PDF without the 'Generated ... ' time, to compare two downloads."""
+    return re.sub(r"Generated by Stockount\s*\W?\s*\d{1,2}/\d{1,2}/\d{4}\s*\d{1,2}:\d{2}\s*[ap]m", "",
+                  _flat("\n".join(pages)))
+
+
+def _check_pdf(ck, st, page, label, pools):
+    """REPLACES the old _check_pdf. Downloads the PDF from every place it is offered (table button, ⋮ menu),
+    checks it is a PDF, checks its CONTENT against the UI (first download), and that the downloads match."""
+    group, codes = "Actions", sorted({_row_vals(r)["code"] for r in st["rows"]})
+    sources = [("table button", lambda: pools["table"][label].click())]
+    menu_label = _find("Download PDF", list(pools["menu"]))
+    if menu_label:
+        def from_menu():
+            page.locator(f"{UI_SUMMARY} button.dots-btn").first.click()
+            page.wait_for_timeout(800)
+            page.locator(f"{UI_SUMMARY} .dropdown-container").first.locator(
+                "button, a, li", has_text=re.compile(rf"^\s*{re.escape(menu_label)}\s*$")).first.click()
+        sources.append(("⋮ menu", from_menu))
+    done = OrderedDict()
+    for where, click in sources:
+        with page.expect_download(timeout=90000) as info:
+            click()
+        path = os.path.join(ck.folder, f"Audit_Summary_{_key(where)}.pdf")
+        info.value.save_as(path)
+        data = open(path, "rb").read()
+        pages = _pdf_pages(path, data)
+        text = "\n".join(pages)
+        found = [x for x in codes if x in text]
+        is_pdf = data[:5] == b"%PDF-"
+        if is_pdf and not text.strip():
+            ck.add(group, f"Download PDF ({where}) is a PDF", True, "a PDF", f"{len(data)} bytes")
+            ck.not_run(group, f"Download PDF ({where}) content", "PDF text is not readable (install poppler-utils or pypdf)")
+            continue
+        named = st["audit"] in text
+        ck.add(group, f"Download PDF ({where}) is a PDF that names the audit and lists every item",
+               is_pdf and named and len(found) == len(codes),
+               f"a PDF naming {st['audit']} with {len(codes)} item code(s)",
+               f"{len(data)} bytes, {len(pages)} page(s); audit named={named}; items found {len(found)}/{len(codes)}; "
+               f"missing={[x for x in codes if x not in found][:10]}")
+        done[where] = pages
+        if len(done) == 1:                                   # full content check once
+            try:
+                _check_pdf_content(ck, st, pages, where)
+            except Exception as e:
+                ck.error("PDF Content", f"content check ({where})", e)
+        _ui_close_menu(page)
+    if len(done) > 1:
+        (w1, p1), (w2, p2) = list(done.items())[:2]
+        same = _pdf_signature(p1) == _pdf_signature(p2)
+        ck.add("PDF Content", f"PDF from {w1} = PDF from {w2} (ignoring the generated time)", same,
+               "same content", "same" if same else "DIFFERENT")
+
+
+# ----------------------------------------------------------------------
+# Export content
+# ----------------------------------------------------------------------
+def _exp_records(df):
+    return [{_key(k): _txt(v) for k, v in r.items()} for _, r in df.iterrows()]
+
+
+def _exp_as_ui(rec):
+    """An export row under the UI field names, so _row_vals() and CHIP_RULES work on it."""
+    return OrderedDict((ui, rec.get(_key(h), "")) for ui, (h, _k) in EXPORT_FIELDS.items())
+
+
+def _exp_equal(kind, field, ev, uv):
+    if kind in ("num", "money"):
+        return _close(_qn(ev), _qn(uv), EXPORT_TOL[kind])
+    if kind == "date":
+        if _blank(ev) and _blank(uv):
+            return True
+        a, b = _parse_date(ev, EXPORT_DATE_FORMAT), _parse_date(uv, DATE_FORMATS["Audited Date"])
+        return bool(a and b and a.date() == b.date())
+    return _blank(ev).lower() == _blank(uv).lower()
+
+
+def _check_export(ck, st):
+    group, sheets = "Export Content", st["sheets"]
+    if not sheets:
+        ck.not_run(group, "Export content", "the export was not downloaded or read")
+        return
+    chips = REQUIRED_FIELDS["Audit Summary Counts"]
+    all_name = _find("All", list(sheets))
+    recs = {n: _exp_records(df) for n, df in sheets.items()}
+
+    # ---- one sheet per chip ------------------------------------------
+    for chip in chips:
+        label = _find(chip, list(sheets))
+        known = chip == "Not Found" and label is None
+        ck.add(group, f"Sheet for '{chip}' exists", label is not None, "a sheet", label or "MISSING",
+               status="KNOWN" if known else None, finding="spec 03 F13" if known else "")
+
+    # ---- headers ------------------------------------------------------
+    want_heads = [h for h, _k in EXPORT_FIELDS.values()]
+    for name, df in sheets.items():
+        cols = [_key(c_) for c_ in df.columns]
+        lost = [h for h in want_heads if _key(h) not in cols]
+        extra = [c_ for c_ in df.columns if _key(c_) not in {_key(h) for h in want_heads + EXPORT_EXTRA_HEADERS}]
+        ck.add(group, f"Sheet '{name}': headers", not lost and not extra, ", ".join(want_heads),
+               f"missing={lost} unexpected={extra}")
+
+    # ---- rows per sheet = rows of the chip -----------------------------
+    lists, ui_chips = st.get("chip_lists") or {}, st["chips"]
+    rows_ui = {_row_vals(r)["code"].upper() for r in st["rows"]}
+    all_ui = [_exp_as_ui(r) for r in recs.get(all_name, [])]
+    for chip in chips:
+        label = _find(chip, list(sheets))
+        if label is None:
+            continue
+        codes = [r.get("itemcode", "").upper() for r in recs[label]]
+        if chip == "All":
+            want_codes, source = rows_ui, "UI rows"
+        elif chip in lists:
+            want_codes, source = lists[chip], "the rows the chip lists in the UI"
+        else:
+            want_codes = {_row_vals(r)["code"].upper() for r in all_ui if _calc(CHIP_RULES[chip], **_row_vals(r))}
+            source = f"rule {CHIP_RULES[chip]} on the All sheet"
+        chip_label = _find(chip, list(ui_chips))
+        count = ui_chips.get(chip_label) if chip_label else None
+        dup = sorted({c_ for c_ in codes if codes.count(c_) > 1})
+        diff_extra, diff_lost = sorted(set(codes) - want_codes), sorted(want_codes - set(codes))
+        ck.add(group, f"Sheet '{label}': rows = {chip} chip", set(codes) == want_codes and not dup
+               and (count is None or len(codes) == count),
+               f"{len(want_codes)} row(s) from {source}; chip count {count}",
+               f"{len(codes)} row(s); only in export={diff_extra[:6]} only in UI={diff_lost[:6]} repeated={dup[:6]}")
+
+    if all_name is None:
+        return
+    # ---- All sheet vs the UI table, field by field ---------------------
+    ui = {_row_vals(r)["code"].upper(): r for r in st["rows"]}
+    for field, (h, kind) in EXPORT_FIELDS.items():
+        if field == "Item Code":
+            continue
+        if _find(field, st["headers"]) is None:
+            ck.not_run(group, f"All sheet: {field} = UI table", "no such column in the UI table")
+            continue
+        bad = []
+        for rec in recs[all_name]:
+            code = rec.get("itemcode", "").upper()
+            r = ui.get(code)
+            if r is None:
+                bad.append(f"{code}: not in the UI table")
+            elif not _exp_equal(kind, field, rec.get(_key(h), ""), _cell(r, field)):
+                bad.append(f"{code}: export {rec.get(_key(h), '')!r} vs UI {_cell(r, field)!r}")
+        ck.add(group, f"All sheet: {field} = UI table", not bad, f"{len(recs[all_name])} row(s) equal",
+               "; ".join(bad[:8]) or f"{len(recs[all_name])} row(s) equal")
+
+    # ---- the file's own arithmetic (needs no UI) ------------------------
+    price = lambda rec: _qn(rec.get("costprice", ""))
+    na_codes = (lists.get(NOT_AUDITED_CHIP))
+    audited = [rec for rec in recs[all_name] if not _not_audited(_row_vals(_exp_as_ui(rec)), na_codes)]
+    for field, rule in ROW_FORMULAS.items():
+        h, kind = EXPORT_FIELDS[field]
+        bad = []
+        for rec in audited:
+            v = _row_vals(_exp_as_ui(rec), {rec.get("itemcode", "").upper(): price(rec)})
+            want = _calc(rule, **v)
+            got = rec.get(_key(h), "")
+            ok = _blank(got) == _blank(want) if isinstance(want, str) else _close(_qn(got), want, EXPORT_TOL[kind])
+            if not ok:
+                bad.append(f"{v['code']}: file {got!r} vs {want if isinstance(want, str) else round(want, 6)!r}")
+        ck.add(group, f"All sheet: {field} = {rule} (file's own numbers)", not bad, f"{len(audited)} row(s) match",
+               "; ".join(bad[:8]) or f"{len(audited)} row(s) match")
+    bad = [f"{rec.get('itemcode')}: {rec.get('auditeddate')!r}" for rec in recs[all_name]
+           if _blank(rec.get("auditeddate")) and not _parse_date(rec["auditeddate"], EXPORT_DATE_FORMAT)]
+    ck.add(group, f"All sheet: AuditedDate format {EXPORT_DATE_FORMAT}", not bad, EXPORT_DATE_FORMAT,
+           "; ".join(bad[:8]) or "all dates match")
+
+    # ---- totals = Quantity Summary cards --------------------------------
+    cards = st.get("qty") or {}
+    for card, col in (("Stock", "stockqty"), ("Audited", "auditedqty"), ("Damaged", "damagedqty")):
+        if card in cards:
+            tot = sum(_qn(r.get(col, "")) for r in recs[all_name])
+            ck.add(group, f"All sheet: Σ {col} = {card} card", _near(tot, cards[card]), cards[card], round(tot, 6))
 
 
 def _check_charts(ck, st):
@@ -1995,6 +2466,7 @@ def validate_summary_ui(page, config, folder=None) -> bool:
         ck.error("Actions", "Export download", e)
     steps = [("Audit Information", lambda: _check_information(ck, st)),
              ("Audit Summary Counts", lambda: _check_counts(ck, st, page)),
+             ("Export Content", lambda: _check_export(ck, st)),
              ("Quantity Summary", lambda: _check_quantities(ck, st)),
              ("Audit Report - Table Fields", lambda: _check_table(ck, st)),
              ("Charts", lambda: _check_charts(ck, st)),

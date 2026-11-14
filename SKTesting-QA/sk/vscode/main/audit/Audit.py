@@ -80,7 +80,7 @@ class Config:
     run_create_audit = False
     run_update_audit = False
     run_ui_validation = False  
-    run_create_Ad_hoc_Audit = True
+    run_create_Ad_hoc_Audit = False
      
     
     # -------------------------------------------------------
@@ -101,9 +101,9 @@ class Config:
     }
     
     
-    run_setup_Audit = True
+    run_setup_Audit = False
 #=============================================================
-    run_stock_audit = True
+    run_stock_audit = False
     run_asv2_checks = True   # after the counts: test page features + cross-check list / Count summary / Finish / Audit Summary
     #add item details for auditor 1
     run_new_add_item = False
@@ -167,7 +167,7 @@ class Config:
     run_A_SA_table = False
     EXCEL_SHEET_as_table = "as_table"
     # Audit Summary checks on ap_audit_name (A_audit_Summary.py; flexible formula-based; Ongoing or History)
-    run_A_audit_Summary = True
+    run_A_audit_Summary = False
     summary_ui_validation = True             # UI validation: required fields, values, formulas, charts & live Excel export
     run_A_audit_Summary_history = True       # Post-completion: Audit History validation (UI + Excel + PDF)
     run_A_Recently_Audit = False
@@ -175,12 +175,12 @@ class Config:
 
     # Finish → Complete on ap_audit_name, step by step (finish_complete_flow.py; finish_flow sheet:
     # declaration note + Accept / Recount / Investigate + recount qty + remarks per item). Step 10 closes the audit.
-    run_finish_audit1 = True        # Step 5: after Auditor 1's count: Finish audit > Audit Declaration (finish_audit.py)
-    run_finish_audit2 = True        # Step 6: after Auditor 2's count: Finish audit > Audit Declaration (finish_audit.py)
-    run_complete_audit = True       # Step 7: Audit Summary > Complete Audit, 3-step popup (complete_audit_popup.py)
-    run_resolution_actions = True   # Step 8: Accept | Recount | Investigate per finish_flow (resolution_actions.py)
-    run_recount = True              # Step 9: Recount sub-audit > review > approve, only if Step 8 chose Recount (recount.py)
-    run_resolution_summary = True   # Step 10: Resolution summary > Adjustment report > Complete Audit > Audit History (resolution_summary.py)
+    run_finish_audit1 = False       # Step 5: after Auditor 1's count: Finish audit > Audit Declaration (finish_audit.py)
+    run_finish_audit2 = False       # Step 6: after Auditor 2's count: Finish audit > Audit Declaration (finish_audit.py)
+    run_complete_audit = False      # Step 7: Audit Summary > Complete Audit, 3-step popup (complete_audit_popup.py)
+    run_resolution_actions = False  # Step 8: Accept | Recount | Investigate per finish_flow (resolution_actions.py)
+    run_recount = False             # Step 9: Recount sub-audit > review > approve, only if Step 8 chose Recount (recount.py)
+    run_resolution_summary = False  # Step 10: Resolution summary > Adjustment report > Complete Audit > Audit History (resolution_summary.py)
     fc_auditor = "Dinesh B"         # recount assignee (Step 8)
     complete_choice = "Move to Not Found"   # Step 7: Complete Audit popup: or "Keep as Unverified"
     fc_closure_note = "QA automated finish/complete run"
