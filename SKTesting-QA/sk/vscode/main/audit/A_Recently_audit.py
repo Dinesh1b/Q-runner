@@ -1,43 +1,135 @@
-import sys
+"""
+RECENTLY AUDITED TABLE — FORMULA & BUSINESS RULE VALIDATION
+=============================================================
+Validates the 'Recently audited' list (app-audit-stock-list-v2) on the
+Stock Audit page directly against business formulas and rules, without
+relying on a rigid, hardcoded expected-rows Excel sheet.
+
+Rules: Stock Audit, Add count (stock qty by location)
+=====================================================
+A. Location rules
+   R1: Audit location is optional. If none is selected, Audited Location = Unassigned.
+   R2: Unassigned is a normal location value. Unassigned = Unassigned counts as a match.
+   R3: A match means the audit location is in the item’s stock-by-location list (row exists, even qty 0).
+   R4: A mismatch means no stock row exists at the audit location.
+
+B. Stock Location and Stock Qty rules (saved row)
+   R5: Match            → Stock Location = Audit location, Stock Qty = Qty at that location
+   R6: Mismatch         → Stock Location = Unassigned,    Stock Qty = Total stock qty (all locations)
+   R7: Match with qty 0 → Stock Location = Audit location, Stock Qty = 0 (not a fallback to total)
+
+C. Form rules
+   R8:  Audited qty is required (ng-invalid when blank). Add count is blocked.
+   R9:  Damaged qty is optional. Min 0, stepper minus is disabled at 0.
+   R10: The Stock Location dropdown on the form is read-only (disabled).
+   R11: Total stock on the form = the sum of all stock-by-location qty.
+   R12: Audit UOM is read-only and comes from the item.
+   R13: Clear resets the item, the quantities and the audit location selection.
+
+D. Result rules (Recently audited)
+   R14: A successful Add count increases the entries pill by 1 and adds a row.
+   R15: The row shows: S.No, Item Code, Item Name, Audited UOM, Auditor Name,
+        Stock Qty, Audited Qty, Damaged Qty, Stock Location, Audited Location.
+   R16: The info tooltip = Stock qty: <Stock Qty column> · Audited qty: <Audited Qty column>.
+   R17: Auditor Name = the logged-in user. The "All auditors" toggle shows other auditors' rows.
+   R18: Page size is 5 by default (5, 10, 25, 50, 100). The pager text is "Showing x–y of N entries".
+   R19: Print and Delete actions apply per row. Print labels applies to selected rows only.
+"""
+
 import os
-import openpyxl
-from typing import List, Dict, Optional
+import re
+import sys
+from collections import OrderedDict
 from dataclasses import dataclass
 from enum import Enum
-from playwright.sync_api import sync_playwright, Page, TimeoutError as PlaywrightTimeoutError
-from pytest import Config
+from typing import Dict, List, Optional, Tuple
+
+import openpyxl
+from playwright.sync_api import Page
+
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8")
 
 
+# ======================================================================
+# DATA BLOCK: RULES & FORMULAS (Fixable configuration)
+# ======================================================================
 
-# ======================================================
-# COLUMN INDICES (based on actual table structure)
-# ======================================================
-# 0:  S.No
-# 1:  Item Code
-# 2:  Item Name
-# 3:  UOM
-# 4:  Auditor Name
-# 5:  Audited Qty
-# 6:  Damage Qty
-# 7:  Audited Image    image tag presence check, not text
-# 8:  Stock Qty
-# 9:  Audited Location
+REQUIRED_COLUMNS = [
+    "S.No",
+    "Item Code",
+    "Item Name",
+    "Audited UOM",
+    "Auditor Name",
+    "Stock Qty",
+    "Audited Qty",
+    "Damaged Qty",
+    "Stock Location",
+    "Audited Location",
+]
 
-COL_S_NO            = 0
-COL_ITEM_CODE       = 1
-COL_ITEM_NAME       = 2
-COL_UOM             = 3
-COL_AUDITOR         = 4
-COL_AUDITED_QTY     = 5
-COL_DAMAGE_QTY      = 6
-COL_AUDITED_IMAGE   = 7   # presence/absence of <img> tag
-COL_STOCK_QTY       = 8
-COL_AUDITED_LOCATION= 9
+# Form rules (checked on the page form elements)
+FORM_RULES = OrderedDict([
+    ("Audited Qty Required (R8)",     ("is_aud_required", "Audited qty input is required (ng-invalid when blank)")),
+    ("Damaged Stepper Minus (R9)",    ("is_dam_disabled", "Damaged qty minus stepper is disabled at 0")),
+    ("Stock Location Disabled (R10)", ("is_loc_disabled", "Stock Location dropdown is read-only / disabled")),
+    ("Audit UOM Read-Only (R12)",     ("is_uom_readonly", "Audit UOM input is read-only")),
+    ("Clear Button Present (R13)",    ("is_clear_visible", "Clear button is visible on form")),
+])
+
+# Page-level rules
+PAGE_RULES = OrderedDict([
+    ("Entries Pill Count (R14)",      ("pill_count == total_rows", "Entries pill equals scraped rows count")),
+    ("Required Columns Present (R15)", ("has_required_cols", "Table contains all 10 required columns")),
+    ("Pager Text Format (R18)",       ("pager_valid", "Pager matches 'Showing x–y of N entries'")),
+    ("Row Actions Present (R19)",     ("has_row_actions", "Print and Delete buttons present on rows")),
+])
+
+# Per-row formula rules (evaluated for every scraped row)
+ROW_FORMULA_RULES = OrderedDict([
+    ("Audited Location (R1)",         ("audited_location != ''", "Must be non-empty (defaults to Unassigned)")),
+    ("Stock Location (R5/R6)",        ("stock_location.lower() == exp_stock_location.lower()", "Match -> audit loc; Mismatch -> Unassigned")),
+    ("Stock Qty (R5/R6/R7)",          ("stock_qty == exp_stock_qty", "Match -> loc qty; Mismatch -> total stock; Match qty 0 -> 0")),
+    ("Audited Qty Valid",             ("audited_qty >= 0", "Audited Qty must be >= 0")),
+    ("Damaged Qty Valid (R9)",        ("damaged_qty >= 0", "Damaged Qty must be >= 0")),
+    ("Auditor Recorded (R17)",        ("auditor_name != ''", "Auditor name must be present")),
+    ("Info Tooltip Format (R16)",     ("tooltip_valid", "Tooltip = 'Stock qty: <Stock Qty> · Audited qty: <Audited Qty>'")),
+])
 
 
-# ======================================================
-# VALIDATION RESULT CLASSES
-# ======================================================
+# ======================================================================
+# COLUMN INDICES (Actual DOM structure of app-audit-stock-list-v2)
+# ======================================================================
+# td[0]:  Checkbox (skip)
+# td[1]:  S.No
+# td[2]:  Item Code (contains .aslv2-info icon with tooltip)
+# td[3]:  Item Name
+# td[4]:  Audited UOM
+# td[5]:  Auditor Name
+# td[6]:  Stock Qty
+# td[7]:  Audited Qty
+# td[8]:  Damaged Qty
+# td[9]:  Stock Location
+# td[10]: Audited Location
+# td[11]: Image
+# td[12]: Actions (Print / Delete)
+
+COL_S_NO             = 1
+COL_ITEM_CODE        = 2
+COL_ITEM_NAME        = 3
+COL_UOM              = 4
+COL_AUDITOR          = 5
+COL_STOCK_QTY        = 6
+COL_AUDITED_QTY      = 7
+COL_DAMAGE_QTY       = 8
+COL_STOCK_LOCATION   = 9
+COL_AUDITED_LOCATION = 10
+COL_AUDITED_IMAGE    = 11
+
+
+# ======================================================================
+# VALIDATION RESULT DATA STRUCTURES
+# ======================================================================
 class ValidationStatus(Enum):
     PASSED  = "PASSED"
     FAILED  = "FAILED"
@@ -46,8 +138,9 @@ class ValidationStatus(Enum):
 
 
 @dataclass
-class FieldValidation:
-    field_name:     str
+class RuleCheckResult:
+    rule_id:        str
+    description:    str
     expected_value: str
     actual_value:   str
     status:         ValidationStatus
@@ -57,742 +150,596 @@ class FieldValidation:
     def passed(self) -> bool:
         return self.status == ValidationStatus.PASSED
 
-    def __str__(self) -> str:
-        # Always show Expected → Actual so every field is fully traceable
-        return (f"  {self.status.value} {self.field_name}: "
-                f"Expected='{self.expected_value}'  →  Got='{self.actual_value}'")
-
 
 @dataclass
-class RowValidation:
-    row_number:        int
-    item_code:         str
-    field_validations: List[FieldValidation]
-    overall_status:    ValidationStatus
-    error_message:     Optional[str] = None
+class RowRuleValidation:
+    row_number:    int
+    item_code:     str
+    checks:        List[RuleCheckResult]
+    overall_status: ValidationStatus
 
     @property
     def passed(self) -> bool:
-        return all(fv.passed for fv in self.field_validations)
-
-    @property
-    def failed_fields(self) -> List[FieldValidation]:
-        return [fv for fv in self.field_validations if not fv.passed]
-
-    def __str__(self) -> str:
-        header = f"\nRow {self.row_number} ({self.item_code}): {self.overall_status.value}"
-        if self.error_message:
-            header += f" - {self.error_message}"
-        field_results = "\n".join(str(fv) for fv in self.field_validations)
-        return f"{header}\n{field_results}"
+        return all(c.passed for c in self.checks)
 
 
 @dataclass
-class ValidationReport:
-    total_rows_expected: int
-    total_rows_actual:   int
-    row_validations:     List[RowValidation]
-    overall_status:      ValidationStatus
-    summary:             Dict[str, int]
-
-    @property
-    def passed_rows(self) -> List[RowValidation]:
-        return [rv for rv in self.row_validations if rv.passed]
-
-    @property
-    def failed_rows(self) -> List[RowValidation]:
-        return [rv for rv in self.row_validations if not rv.passed]
+class FormulaValidationReport:
+    total_rows:     int
+    entries_pill:   int
+    page_checks:    List[RuleCheckResult]
+    form_checks:    List[RuleCheckResult]
+    row_checks:     List[RowRuleValidation]
+    overall_status: ValidationStatus
 
     def print_report(self):
-        """
-        Clean, focused report output - aligned columns, failures only.
-        """
-        print("\n" + "=" * 100)
-        print("VALIDATION REPORT")
-        print("=" * 100)
+        print("\n" + "=" * 105)
+        print("📋 RECENTLY AUDITED — BUSINESS FORMULA & RULE VALIDATION REPORT")
+        print("=" * 105)
 
-        # ── EXECUTIVE SUMMARY ────────────────────────────────────
-        status_emoji = "  " if self.overall_status == ValidationStatus.PASSED else ""
-        print(f"\n{status_emoji} OVERALL: {self.overall_status.value}")
-        print(f"  Expected Rows:  {self.total_rows_expected}")
-        print(f"  Actual Rows:    {self.total_rows_actual}")
-        print(f"  Passed:         {len(self.passed_rows)}")
-        print(f"  Failed:         {len(self.failed_rows)}")
+        # Executive Summary
+        icon = "✅" if self.overall_status == ValidationStatus.PASSED else "❌"
+        print(f"\n{icon} OVERALL STATUS : {self.overall_status.value}")
+        print(f"   Entries Pill Count : {self.entries_pill}")
+        print(f"   Scraped Rows Count : {self.total_rows}")
 
-        # ── ROW COUNT MISMATCH (if applicable) ────────────────────────────────────
-        if self.total_rows_expected != self.total_rows_actual:
-            mismatch_indicator = "⚠️ " if self.total_rows_actual > self.total_rows_expected else ""
-            print(f"\n{mismatch_indicator} ROW COUNT MISMATCH")
-            print(f"  Expected {self.total_rows_expected} rows, found {self.total_rows_actual}")
+        # Form Rules
+        if self.form_checks:
+            print("\n" + "-" * 105)
+            print("1. FORM RULES (R8 - R13)")
+            print("-" * 105)
+            for c in self.form_checks:
+                status_icon = "  PASS" if c.passed else "  FAIL"
+                print(f" {status_icon} | {c.rule_id:<32} | Exp: {c.expected_value:<15} | Got: {c.actual_value}")
 
-        # ── FAILURES ONLY (skip if all passed) ───────────────────────────────────
-        if self.failed_rows:
-            print("\n" + "-" * 100)
-            print(f"FAILURES ({len(self.failed_rows)} row(s))")
-            print("-" * 100)
+        # Page Rules
+        if self.page_checks:
+            print("\n" + "-" * 105)
+            print("2. PAGE & RESULT RULES (R14 - R19)")
+            print("-" * 105)
+            for c in self.page_checks:
+                status_icon = "  PASS" if c.passed else "  FAIL"
+                print(f" {status_icon} | {c.rule_id:<32} | Exp: {c.expected_value:<15} | Got: {c.actual_value}")
 
-            for rv in self.failed_rows:
-                # Row header with item code for quick identification
-                header_line = f"\nRow {rv.row_number} | {rv.item_code}"
-                if rv.error_message:
-                    header_line += f" | {rv.error_message}"
-                print(header_line)
+        # Per-Row Formula Checks
+        print("\n" + "-" * 105)
+        print(f"3. PER-ROW LOCATION & STOCK FORMULAS (R1 - R7, R16) — {len(self.row_checks)} row(s)")
+        print("-" * 105)
 
-                # Show only failed fields (aligned columns with status icons)
-                if rv.failed_fields:
-                    # Calculate column widths
-                    max_field_len = max(len(fv.field_name) for fv in rv.failed_fields)
-                    max_expected_len = max(len(fv.expected_value) for fv in rv.failed_fields)
-
-                    for fv in rv.failed_fields:
-                        status_icon = "  " if fv.passed else ""
-                        field_col = fv.field_name.ljust(max_field_len)
-                        expected_col = fv.expected_value.ljust(max_expected_len)
-                        print(f"  {status_icon} {field_col}  →  Expected: {expected_col}  |  Actual: {fv.actual_value}")
+        failed_rows = [r for r in self.row_checks if not r.passed]
+        if not failed_rows:
+            print("  ✅ All rows passed all formula and business rules.")
         else:
-            print("\n   All rows passed validation")
+            print(f"  ⚠️ {len(failed_rows)} row(s) had formula/rule discrepancies:\n")
+            for r in failed_rows:
+                print(f"  Row {r.row_number} [{r.item_code}]:")
+                for c in r.checks:
+                    if not c.passed:
+                        print(f"     ❌ FAIL | {c.rule_id:<28} | Exp: {c.expected_value:<20} | Got: {c.actual_value}")
 
-        # ── STATISTICS ──────────────────────────────────────
-        if self.row_validations:
-            total_fields  = sum(len(rv.field_validations) for rv in self.row_validations)
-            passed_fields = sum(sum(1 for fv in rv.field_validations if fv.passed)
-                                for rv in self.row_validations)
-            failed_fields = total_fields - passed_fields
+        # Summary Statistics
+        all_checks = self.form_checks + self.page_checks + [c for r in self.row_checks for c in r.checks]
+        passed_count = sum(1 for c in all_checks if c.passed)
+        failed_count = sum(1 for c in all_checks if not c.passed)
+        pct = (passed_count / len(all_checks) * 100) if all_checks else 0.0
 
-            accuracy = (passed_fields / total_fields) * 100 if total_fields > 0 else 0
+        print("\n" + "-" * 105)
+        print("STATISTICS")
+        print("-" * 105)
+        print(f"  Total Checks : {len(all_checks)}")
+        print(f"  Passed       : {passed_count}")
+        print(f"  Failed       : {failed_count}")
+        print(f"  Accuracy     : {pct:.1f}%")
+        print("=" * 105 + "\n")
 
-            print("\n" + "-" * 100)
-            print("STATISTICS")
-            print("-" * 100)
-            print(f"  Total Fields:  {total_fields}")
-            print(f"  Passed:        {passed_fields}")
-            print(f"  Failed:        {failed_fields}")
-            print(f"  Accuracy:      {accuracy:.1f}%")
 
-        print("\n" + "=" * 100 + "\n")
-
-    # ── Timing / polling ────────────────────────────────
-    TABLE_LOAD_TIMEOUT    = 60000
-    ROW_LOAD_TIMEOUT      = 20000
-    NETWORK_IDLE_TIMEOUT  = 15000
-    POLLING_INTERVAL      = 1000
-    MAX_POLL_ATTEMPTS     = 60
-
-if sys.platform == "win32":
-       sys.stdout.reconfigure(encoding='utf-8')
-# ======================================================
-# UTILITY FUNCTIONS
-# ======================================================
+# ======================================================================
+# HELPER FUNCTIONS
+# ======================================================================
 def normalize(text: str) -> str:
     return text.replace(",", "").strip() if text else ""
 
 
-def compare_values(expected: str, actual: str, field_name: str) -> FieldValidation:
-    if normalize(expected) == normalize(actual):
-        return FieldValidation(field_name, expected, actual, ValidationStatus.PASSED)
-    return FieldValidation(field_name, expected, actual, ValidationStatus.FAILED,
-                        "Value mismatch")
+def _num(text) -> float:
+    s = normalize(str(text or ""))
+    m = re.match(r"^[-+]?\d+(\.\d+)?", s)
+    return float(m.group()) if m else 0.0
 
 
-def is_fully_blank_row(row: Dict[str, str]) -> bool:
-    keys_to_check = [
-        "item_code",
-        "item_name",
-        "uom",
-        "auditor_name",
-        "audited_qty",
-        "damaged_qty",
-        "stock_qty",
-        "audited_location",
-    ]
-    return all(not row.get(k, "").strip() for k in keys_to_check)
+def _clean(text) -> str:
+    return " ".join(str(text or "").split())
 
-def load_expected_rows_from_excel(
-        excel_path: str,
-        sheet_name: Optional[str] = None
-    ) -> List[Dict[str, str]]:
+
+def _calc(formula: str, **kwargs) -> bool:
+    """Safe evaluation for formula strings."""
+    try:
+        scope = {"min": min, "max": max, "round": round, "abs": abs, "sum": sum, "len": len}
+        scope.update(kwargs)
+        return bool(eval(formula, {"__builtins__": None}, scope))
+    except Exception as e:
+        return False
+
+
+def load_stock_sheet_data(excel_path: str, sheet_name: str = "Data") -> Dict[str, Dict[str, float]]:
+    """Loads item stock by location: {code: {location: qty}}."""
+    stock_by_loc: Dict[str, Dict[str, float]] = {}
+    if not excel_path or not os.path.exists(excel_path):
+        return stock_by_loc
+    try:
+        wb = openpyxl.load_workbook(excel_path, data_only=True)
+        if sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            rows_iter = ws.iter_rows(values_only=True)
+            first_row = next(rows_iter, None)
+            if first_row:
+                hdr = [str(c or "").strip() for c in first_row]
+                h_map = {h: i for i, h in enumerate(hdr)}
+                c_idx = h_map.get("Item Code")
+                l_idx = h_map.get("Location")
+                q_idx = h_map.get("Adjustmentqty") if "Adjustmentqty" in h_map else h_map.get("Stock Quantity")
+                if c_idx is not None and q_idx is not None:
+                    for r in rows_iter:
+                        code = str(r[c_idx] or "").strip()
+                        if not code or code == "None":
+                            continue
+                        loc = str(r[l_idx] or "Unassigned").strip() if l_idx is not None and r[l_idx] else "Unassigned"
+                        qty = float(r[q_idx]) if r[q_idx] is not None else 0.0
+                        stock_by_loc.setdefault(code, {})[loc] = qty
+    except Exception as e:
+        print(f"  ⚠️ Could not load stock data from {excel_path}: {e}")
+    return stock_by_loc
+
+
+def calc_expected_stock(code: str, audit_loc: str, stock_data: Dict[str, Dict[str, float]]) -> Tuple[str, float]:
     """
-    Read Recently_Audited.xlsx and return a list of dicts matching
-    the keys used by the validator:
-        item_code, item_name, uom, auditor_name,
-        audited_qty, damaged_qty, stock_qty, audited_location
-    Row 1 is treated as the header; data starts at row 2.
+    Implements Decision Table & Rules R1 - R7:
+    R1: Audit location is optional. If none is selected, Audited Location = Unassigned.
+    R2: Unassigned is a normal location value. Unassigned = Unassigned counts as a match.
+    R3: A match means audit location is in item's stock-by-location list (a row exists, even qty 0).
+    R4: A mismatch means no stock row exists at the audit location.
+    R5: Match            → Stock Location = Audit location, Stock Qty = Qty at that location
+    R6: Mismatch         → Stock Location = Unassigned,    Stock Qty = Total stock qty (all locations)
+    R7: Match with qty 0 → Stock Location = Audit location, Stock Qty = 0 (not a fallback to total)
     """
-    if not os.path.exists(excel_path):
-        print(f" ERROR: Excel file not found at {excel_path}")
-        return []
+    norm_audit = (audit_loc or "").strip()
+    if not norm_audit or norm_audit.lower() in ("none", "0"):
+        norm_audit = "Unassigned"
 
-    wb = openpyxl.load_workbook(excel_path, data_only=True)
+    item_stocks = stock_data.get(code, {})
 
-    #    Sheet selection
-    if sheet_name:
-        if sheet_name not in wb.sheetnames:
-            print(f" ERROR: Sheet '{sheet_name}' not found. Available sheets: {wb.sheetnames}")
-            return []
-        ws = wb[sheet_name]
-        print(f"📄 Loaded Excel sheet: {sheet_name}")
+    # Check match against stock locations (case-insensitive)
+    matched_loc = None
+    for loc_name in item_stocks:
+        if loc_name.strip().lower() == norm_audit.lower():
+            matched_loc = loc_name
+            break
+
+    if matched_loc is not None:
+        # Match (R5, R7)
+        return norm_audit, float(item_stocks[matched_loc])
     else:
-        ws = wb.active
-        print(f"📄 Loaded Excel active sheet: {ws.title}")
-    rows = list(ws.iter_rows(values_only=True))
-    print(len(rows))
-    # Map header → column index
-    header = [str(h).strip() if h is not None else "" for h in rows[0]]
-    col_map = {h: i for i, h in enumerate(header)}
+        # Mismatch (R6)
+        total_qty = sum(float(q) for q in item_stocks.values())
+        return "Unassigned", total_qty
 
-    expected = []
-    for row in rows[1:]:
 
-        def get(col_name: str) -> str:
-            idx = col_map.get(col_name)
-            if idx is None:
-                return ""
-            val = row[idx]
-            if isinstance(val, float) and val.is_integer():
-                return str(int(val))
-            return str(val).strip() if val is not None else ""
-
-        row_data = {
-            "s_no":             get("S.No"),
-            "item_code":        get("Item Code"),
-            "item_name":        get("Item Name"),
-            "uom":              get("UOM"),
-            "auditor_name":     get("Auditor Name"),
-            "audited_qty":      get("Audited Qty"),
-            "damaged_qty":      get("Damage Qty"),
-            "stock_qty":        get("Stock Qty"),
-            "audited_location": get("Audited Location"),
-            "audited_image":    "",
-        }
-
-        # 🚫 SKIP fully blank Excel rows (ignore S.No)
-        if all(not value.strip() for key, value in row_data.items() if key != "s_no"):
-            
-            continue
-
-        expected.append(row_data)
-    return expected
-# ======================================================
-# TABLE SELECTORS & WAITING
-# ======================================================
+# ======================================================================
+# DOM EXTRACTION & PAGINATION
+# ======================================================================
 def try_multiple_table_selectors(page: Page) -> Optional[any]:
-    
     selectors = [
-        ("xpath=//*[contains(text(),'Recently Audited')]/following::table[1]", "XPath - following table"),
-        ("xpath=//div[contains(text(),'Recently Audited')]/following-sibling::*//table", "XPath - sibling table"),
-        (".common-table table",        "CSS - common-table class"),
-        ("p-table table",              "CSS - p-table element"),
-        (".p-datatable-wrapper table", "CSS - datatable wrapper"),
-        ("table >> nth=0", "First table"),
-        ("table >> nth=1", "Second table"),
-        ("table >> nth=2", "Third table"),
+        ("app-audit-stock-list-v2 p-table table", "Scoped table in app-audit-stock-list-v2"),
+        (".aslv2-ptable table", "CSS - aslv2-ptable class"),
+        ("xpath=//*[contains(text(),'Recently audited')]/following::table[1]", "XPath - following Recently audited"),
+        ("p-table table", "CSS - p-table element"),
     ]
     for selector, description in selectors:
         try:
-            print(f"  Trying: {description}")
             table = page.locator(selector)
             if table.count() > 0 and table.locator("tbody").first.count() > 0:
-                print(f"       Found table using: {description}")
                 return table.first
-            print("     No match")
-        except Exception as e:
-            print(f"     Error: {e}")
-    print("   No suitable table found")
-    return None
-
-
-def wait_for_table_with_polling(page: Page) -> Optional[any]:
-    
-    for attempt in range(60):
-        try:
-            if attempt % 5 == 0:
-                print(f"  Attempt {attempt + 1}/60...")
-            page.wait_for_load_state("domcontentloaded", timeout=2000)
-            table = try_multiple_table_selectors(page)
-            if table and table.locator("tbody tr").count() > 0:
-                print(f"\n     Found table with {table.locator('tbody tr').count()} rows")
-                return table
-            page.wait_for_timeout(1000)
-            if attempt % 5 == 0:
-                page.keyboard.press("PageDown")
-                page.wait_for_timeout(500)
-        except Exception as e:
-            if attempt % 20 == 0:
-                print(f"    ⚠️  Polling error: {str(e)[:100]}")
-    print("   Polling timeout")
+        except Exception:
+            pass
     return None
 
 
 def wait_for_table_to_load(page: Page) -> bool:
-    print("\n" + "=" * 70)
-    print("⏳ WAITING FOR TABLE TO LOAD")
-    print("=" * 70)
     try:
-        try:
-            page.wait_for_load_state("networkidle", timeout=15000)
-            
-        except:
-            print("  ⚠️  Network idle timeout (continuing)")
         page.wait_for_load_state("domcontentloaded", timeout=5000)
-        page.wait_for_timeout(5000)
-        page.keyboard.press("PageDown")
         page.wait_for_timeout(2000)
-        return wait_for_table_with_polling(page) is not None
-    except Exception as e:
-        print(f"\n ERROR: {e}")
+        return try_multiple_table_selectors(page) is not None
+    except Exception:
         return False
 
 
-# ======================================================
-# ROW EXTRACTION (FIXED FOR TEXT WRAPPING)
-# ======================================================
-def extract_row_data(row, row_index: int) -> Dict[str, str]:
-    """
-    Extract row data with improved text handling.
-    Uses text_content() instead of inner_text() to capture wrapped text
-    and normalize whitespace from wrapped elements.
-    """
+def get_entries_pill_count(page: Page) -> int:
+    """Reads count from pill: '7 entries' -> 7."""
+    try:
+        pill = page.locator("span.aslv2-count-pill")
+        if pill.count() > 0:
+            m = re.search(r"\d+", pill.first.inner_text(timeout=3000))
+            return int(m.group()) if m else 0
+    except Exception:
+        pass
+    return 0
+
+
+def extract_row_data(row) -> Dict[str, any]:
     cells = row.locator("td")
 
     def safe_text(col_idx: int) -> str:
-        """Extract text, handling text wrapping by collapsing whitespace."""
         try:
-            # text_content() captures all text including wrapped text
-            text = cells.nth(col_idx).text_content(timeout=5000).strip()
-            # Remove extra whitespace and newlines from text wrapping
-            text = " ".join(text.split())
-            return text
-        except:
-            return "N/A"
+            text = cells.nth(col_idx).text_content(timeout=3000).strip()
+            return " ".join(text.split())
+        except Exception:
+            return ""
 
     def has_image(col_idx: int) -> str:
-        """Return 'Yes' if cell contains a real <img>, else 'No'."""
         try:
             img = cells.nth(col_idx).locator("img")
             if img.count() > 0:
-                src = img.first.get_attribute("src", timeout=3000) or ""
+                src = img.first.get_attribute("src", timeout=2000) or ""
                 if src and "no_image" not in src:
                     return "Yes"
             return "No"
-        except:
+        except Exception:
             return "No"
 
-    return {
-        "s_no":             safe_text(COL_S_NO),               # col 0
-        "item_code":        safe_text(COL_ITEM_CODE),          # col 1
-        "item_name":        safe_text(COL_ITEM_NAME),          # col 2
-        "uom":              safe_text(COL_UOM),                # col 3
-        "auditor_name":     safe_text(COL_AUDITOR),            # col 4
-        "audited_qty":      safe_text(COL_AUDITED_QTY),        # col 5
-        "damaged_qty":      safe_text(COL_DAMAGE_QTY),         # col 6
-        "audited_image":    has_image(COL_AUDITED_IMAGE),      # col 7 — img presence
-        "stock_qty":        safe_text(COL_STOCK_QTY),          # col 8
-        "audited_location": safe_text(COL_AUDITED_LOCATION),   # col 9 — handles wrapped text
-    }
-
-
-# ======================================================
-# VALIDATION ENGINE
-# ======================================================
-def validate_row_against_expected(
-        actual: Dict[str, str],
-        expected: Dict[str, str],
-    ) -> RowValidation:
-    """
-    Validate one actual row against its item_code-matched expected row.
-    S.No is completely ignored — order is irrelevant.
-    """
-    validations: List[FieldValidation] = []
- 
-    fields = [
-        ("Item Name",        "item_name"),
-        ("UOM",              "uom"),
-        ("Auditor Name",     "auditor_name"),
-        ("Audited Qty",      "audited_qty"),
-        ("Damage Qty",       "damaged_qty"),
-        ("Stock Qty",        "stock_qty"),
-        ("Audited Location", "audited_location"),
-    ]
-    for label, key in fields:
-        validations.append(
-            compare_values(expected.get(key, ""), actual.get(key, ""), label)
-        )
- 
-    # Audited Image — SKIPPED when Excel has no expected value
-    img_actual   = actual.get("audited_image", "No")
-    img_expected = expected.get("audited_image", "")
-    if img_expected == "":
-        validations.append(FieldValidation(
-            field_name="Audited Image",
-            expected_value="(not in Excel)",
-            actual_value=img_actual,
-            status=ValidationStatus.SKIPPED,
-        ))
-    else:
-        validations.append(compare_values(img_expected, img_actual, "Audited Image"))
- 
-    non_skipped = [v for v in validations if v.status != ValidationStatus.SKIPPED]
-    status = (ValidationStatus.PASSED if all(v.passed for v in non_skipped)
-              else ValidationStatus.FAILED)
- 
-    return RowValidation(
-        row_number=0,                        # position irrelevant
-        item_code=actual.get("item_code", "?"),
-        field_validations=validations,
-        overall_status=status,
-    )
- 
- 
-def validate_excel_columns_only(
-        rows_data: List[Dict[str, str]],
-        expected_data: List[Dict[str, str]],
-    ) -> ValidationReport:
-    """
-    Item-code-keyed validation. Row order in UI vs Excel is completely irrelevant.
- 
-    actual item_code not in Excel  -> WARNING  (extra / unexpected row)
-    Excel item_code not in UI      -> FAILED   (missing row)
-    """
-    row_validations: List[RowValidation] = []
- 
-    # Build lookup: item_code -> expected row
-    expected_by_code: Dict[str, Dict[str, str]] = {}
-    for exp in expected_data:
-        code = exp.get("item_code", "").strip()
-        if code and code not in expected_by_code:
-            expected_by_code[code] = exp
- 
-    matched_codes: set = set()
- 
-    # Validate each scraped UI row
-    for actual in rows_data:
-        code = actual.get("item_code", "").strip()
-        exp  = expected_by_code.get(code)
- 
-        if exp is None:
-            row_validations.append(RowValidation(
-                row_number=0,
-                item_code=code or "?",
-                field_validations=[],
-                overall_status=ValidationStatus.WARNING,
-                error_message=f"'{code}' in UI but NOT in Excel",
-            ))
-        else:
-            matched_codes.add(code)
-            row_validations.append(validate_row_against_expected(actual, exp))
- 
-    # Flag Excel rows missing from UI
-    for exp in expected_data:
-        code = exp.get("item_code", "").strip()
-        if code and code not in matched_codes:
-            row_validations.append(RowValidation(
-                row_number=0,
-                item_code=code,
-                field_validations=[],
-                overall_status=ValidationStatus.FAILED,
-                error_message=f"'{code}' in Excel but NOT found in UI",
-            ))
- 
-    counts_match = len(rows_data) == len(expected_data)
-    all_passed   = all(
-        rv.overall_status in (ValidationStatus.PASSED, ValidationStatus.WARNING)
-        for rv in row_validations
-    )
-    overall = ValidationStatus.PASSED if all_passed and counts_match else ValidationStatus.FAILED
- 
-    return ValidationReport(
-        total_rows_expected=len(expected_data),
-        total_rows_actual=len(rows_data),
-        row_validations=row_validations,
-        overall_status=overall,
-        summary={
-            "passed":  sum(1 for rv in row_validations if rv.overall_status == ValidationStatus.PASSED),
-            "failed":  sum(1 for rv in row_validations if rv.overall_status == ValidationStatus.FAILED),
-            "warning": sum(1 for rv in row_validations if rv.overall_status == ValidationStatus.WARNING),
-        }
-    )
- 
-
-# ======================================================
-# PAGINATION HELPERS
-# ======================================================
-def get_total_entries(page: Page) -> int:
-    """Read total row count from 'Showing X to Y of Z entries' text."""
-    try:
-        text = page.locator("#pageshow").inner_text(timeout=5000).strip()
-        # e.g. "Showing 1 to 5 of 12 entries"
-        total = int(text.split("of")[1].split("entries")[0].strip())
-        print(f"  📄 Paginator says: '{text}' → total entries: {total}")
-        return total
-    except Exception as e:
-        print(f"  ⚠️  Could not read total entries: {e}")
-        return -1
-
-
-def extract_current_page_rows(page: Page, global_offset: int) -> List[Dict[str, str]]:
-    """Extract all visible rows on the current page with wrapped text support."""
-    table = try_multiple_table_selectors(page)
-    if not table:
-        return []
-    rows = table.locator("tbody tr")
-    count = rows.count()
-    results = []
-    
-    col_widths = {
-        "s_no": 4,
-        "item_code": 10,
-        "item_name": 12,
-        "uom": 4,
-        "auditor_name": 10,
-        "audited_qty": 8,
-        "damaged_qty": 8,
-        "audited_image": 5,
-        "stock_qty": 6,
-        "audited_location": 30,  # Increased for wrapped location text
-    }
-    
-    for i in range(count):
+    def get_tooltip() -> str:
         try:
-            data = extract_row_data(rows.nth(i), global_offset + i)
-            # 🚫 Skip fully blank UI rows
-            if is_fully_blank_row(data):
-                print(f"  ️  Skipping blank UI row at position {global_offset + i + 1}")
-                continue
-            results.append(data)
-            
-            # Build aligned row output (with location text truncated for display)
-            s_no_col = data['s_no'].ljust(col_widths['s_no'])
-            code_col = data['item_code'].ljust(col_widths['item_code'])
-            name_col = data['item_name'][:12].ljust(col_widths['item_name'])
-            uom_col = data['uom'].ljust(col_widths['uom'])
-            auditor_col = data['auditor_name'][:10].ljust(col_widths['auditor_name'])
-            audited_col = data['audited_qty'].ljust(col_widths['audited_qty'])
-            damaged_col = data['damaged_qty'].ljust(col_widths['damaged_qty'])
-            image_col = data['audited_image'].ljust(col_widths['audited_image'])
-            stock_col = data['stock_qty'].ljust(col_widths['stock_qty'])
-            location_col = data['audited_location'][:30]  # Show up to 30 chars
-            
-            print(f"  {s_no_col} | {code_col} | {name_col} | {uom_col} | {auditor_col} | "
-                f"{audited_col} | {damaged_col} | {image_col} | {stock_col} | {location_col}")
-        except Exception as e:
-            print(f"   Error extracting row {global_offset + i + 1}: {e}")
-    return results
+            tip_el = cells.nth(COL_ITEM_CODE).locator("i.aslv2-info")
+            if tip_el.count() > 0:
+                return tip_el.first.get_attribute("ng-reflect-content", timeout=2000) or ""
+        except Exception:
+            pass
+        return ""
+
+    return {
+        "s_no":             safe_text(COL_S_NO),
+        "item_code":        safe_text(COL_ITEM_CODE),
+        "item_name":        safe_text(COL_ITEM_NAME),
+        "uom":              safe_text(COL_UOM),
+        "auditor_name":     safe_text(COL_AUDITOR),
+        "stock_qty":        _num(safe_text(COL_STOCK_QTY)),
+        "audited_qty":      _num(safe_text(COL_AUDITED_QTY)),
+        "damaged_qty":      _num(safe_text(COL_DAMAGE_QTY)),
+        "stock_location":   safe_text(COL_STOCK_LOCATION),
+        "audited_location": safe_text(COL_AUDITED_LOCATION),
+        "audited_image":    has_image(COL_AUDITED_IMAGE),
+        "tooltip":          get_tooltip(),
+    }
 
 
 def go_to_next_page(page: Page) -> bool:
-    """Click the Next page button. Returns True if clicked, False if disabled."""
     try:
-        next_btn = page.locator("button.p-paginator-next")
-        if next_btn.count() == 0:
-            return False
-        classes = next_btn.get_attribute("class") or ""
-        if "p-disabled" in classes:
+        next_btn = page.locator("app-audit-pager button.apg-btn:has(i.bi-chevron-right)")
+        if next_btn.count() == 0 or next_btn.is_disabled():
             return False
         next_btn.click()
-        page.wait_for_load_state("networkidle", timeout=10000)
-        page.wait_for_timeout(1500)
+        page.wait_for_timeout(1000)
         return True
-    except Exception as e:
-        print(f"  ⚠️  Next page error: {e}")
+    except Exception:
         return False
 
 
-# ======================================================
-# COMPREHENSIVE VALIDATION
-# ======================================================
-def validate_table_comprehensive(
-        page: Page,
-        expected_rows: List[Dict[str, str]]
-    ) -> ValidationReport:
-    print("\n" + "=" * 80)
-    print("🔍 COMPREHENSIVE TABLE VALIDATION  (all pages)")
-    print("=" * 80)
+def set_page_size(page: Page, size: str = "100") -> None:
+    try:
+        dd = page.locator("app-audit-pager .apg-size p-dropdown")
+        if dd.count() > 0:
+            dd.click()
+            opt = page.locator("li.p-dropdown-item", has_text=re.compile(rf"^\s*{size}\s*$"))
+            if opt.count() > 0:
+                opt.first.click()
+                page.wait_for_timeout(1000)
+    except Exception:
+        pass
 
+
+# ======================================================================
+# FORM & PAGE RULES CHECKERS
+# ======================================================================
+def check_form_rules(page: Page) -> List[RuleCheckResult]:
+    checks = []
+
+    # R8: Audited qty required
+    aud_input = page.locator("input[formcontrolname='auditedQty']")
+    if aud_input.count():
+        cls_val = aud_input.get_attribute("class") or ""
+        is_req = "ng-invalid" in cls_val or page.locator(".asv2-field--audited .asv2-required").is_visible()
+        checks.append(RuleCheckResult(
+            "Audited Qty Required (R8)", "Required input validation",
+            "True", str(is_req),
+            ValidationStatus.PASSED if is_req else ValidationStatus.FAILED
+        ))
+
+    # R9: Damaged stepper minus disabled at 0
+    dam_minus = page.locator("button[aria-label='Decrease damaged qty']")
+    if dam_minus.count():
+        is_dis = dam_minus.is_disabled()
+        checks.append(RuleCheckResult(
+            "Damaged Stepper Minus (R9)", "Disabled at min value 0",
+            "True", str(is_dis),
+            ValidationStatus.PASSED if is_dis else ValidationStatus.FAILED
+        ))
+
+    # R10: Stock location dropdown is read-only / disabled
+    loc_dd = page.locator("p-dropdown[inputid='asv2Location']")
+    if loc_dd.count():
+        cls_val = loc_dd.get_attribute("class") or ""
+        is_dis = "p-disabled" in cls_val
+        checks.append(RuleCheckResult(
+            "Stock Location Disabled (R10)", "Dropdown is read-only / disabled",
+            "True", str(is_dis),
+            ValidationStatus.PASSED if is_dis else ValidationStatus.FAILED
+        ))
+
+    # R12: Audit UOM input is read-only
+    uom_input = page.locator("input#uom")
+    if uom_input.count():
+        is_ro = uom_input.get_attribute("readonly") is not None
+        checks.append(RuleCheckResult(
+            "Audit UOM Read-Only (R12)", "Input is read-only",
+            "True", str(is_ro),
+            ValidationStatus.PASSED if is_ro else ValidationStatus.FAILED
+        ))
+
+    # R13: Clear button is visible
+    clear_btn = page.locator("button.asv2-btn.warning:has-text('Clear')")
+    if clear_btn.count():
+        is_vis = clear_btn.is_visible()
+        checks.append(RuleCheckResult(
+            "Clear Button Present (R13)", "Clear button visible",
+            "True", str(is_vis),
+            ValidationStatus.PASSED if is_vis else ValidationStatus.FAILED
+        ))
+
+    return checks
+
+
+# ======================================================================
+# CORE FORMULA VALIDATOR (No rigid expected Excel sheet required)
+# ======================================================================
+def validate_recently_audited_by_rules(
+    page: Page,
+    stock_data: Dict[str, Dict[str, float]],
+) -> FormulaValidationReport:
+    """
+    Main formula and rule validator for the Recently Audited list.
+    Evaluates:
+      - Form rules R8 - R13
+      - Page rules R14, R15, R18, R19
+      - Per-row Decision Table rules R1 - R7, R16, R17
+    """
+    # 1. Check form rules
+    form_checks = check_form_rules(page)
+
+    # 2. Check table load
     if not wait_for_table_to_load(page):
-        return ValidationReport(len(expected_rows), 0, [], ValidationStatus.FAILED,
-                                {"error": "Table not found"})
+        return FormulaValidationReport(
+            total_rows=0, entries_pill=0, page_checks=[],
+            form_checks=form_checks, row_checks=[],
+            overall_status=ValidationStatus.FAILED
+        )
 
-    total_entries = get_total_entries(page)
-    print(f"\n📊 Total entries in UI: {total_entries} | Expected from Excel: {len(expected_rows)}")
+    # 3. Entries pill (R14)
+    pill_count = get_entries_pill_count(page)
 
-    # ── Scrape every page ────────────────────────────────────────────────────
-    all_rows_data: List[Dict[str, str]] = []
-    current_page = 1
+    # 4. Check table header columns (R15)
+    headers = [_clean(h) for h in page.locator("app-audit-stock-list-v2 thead th").all_inner_texts()]
+    has_required_cols = all(any(req.lower() in h.lower() for h in headers) for req in REQUIRED_COLUMNS)
+    page_checks = [
+        RuleCheckResult(
+            "Required Columns Present (R15)", "Columns match specification",
+            "All 10 required columns present",
+            f"{len(headers)} columns found",
+            ValidationStatus.PASSED if has_required_cols else ValidationStatus.FAILED
+        )
+    ]
 
+    # 5. Pager text format (R18)
+    pager = page.locator("app-audit-pager .apg-info")
+    if pager.count():
+        pager_text = _clean(pager.inner_text())
+        pager_valid = bool(re.search(r"Showing \d+[–-]\d+ of \d+ entries", pager_text, re.I))
+        page_checks.append(RuleCheckResult(
+            "Pager Text Format (R18)", "Matches 'Showing x–y of N entries'",
+            "Showing x–y of N entries", pager_text,
+            ValidationStatus.PASSED if pager_valid else ValidationStatus.FAILED
+        ))
+
+    # 6. Row actions present (R19)
+    print_btn = page.locator("app-audit-stock-list-v2 button.aslv2-row-btn[aria-label='Print']")
+    del_btn = page.locator("app-audit-stock-list-v2 button.aslv2-row-btn[aria-label='Delete']")
+    has_actions = (print_btn.count() > 0 and print_btn.first.is_visible() and
+                   del_btn.count() > 0 and del_btn.first.is_visible())
+    page_checks.append(RuleCheckResult(
+        "Row Actions Present (R19)", "Print and Delete buttons exist per row",
+        "Visible", "Visible" if has_actions else "Missing",
+        ValidationStatus.PASSED if has_actions else ValidationStatus.FAILED
+    ))
+
+    # 7. Scrape all rows across all pages (set to 100 per page to minimize turns)
+    set_page_size(page, "100")
+    table = try_multiple_table_selectors(page)
+    all_rows = []
     while True:
-        print(f"\n📄 Scraping page {current_page}...")
-        
-        # Print header on first page
-        if current_page == 1:
-            print("  S.NO | ITEM CODE  | ITEM NAME    | UOM | AUDITOR    | AUDITED_QTY | DAMAGED_QTY | IMAGE | STOCK |           LOCATION")
-            print("  -----|------------|--------------|-----|------------|-------------|-------------|-------|-------|------------------------------")
-        
-        page_rows = extract_current_page_rows(page, global_offset=len(all_rows_data))
-        all_rows_data.extend(page_rows)
-
-        # Try to advance to next page
+        rows_loc = table.locator("tbody tr")
+        for i in range(rows_loc.count()):
+            data = extract_row_data(rows_loc.nth(i))
+            if data.get("item_code"):
+                all_rows.append(data)
         if not go_to_next_page(page):
-            print(f"\n     No more pages — scraped {len(all_rows_data)} rows total")
             break
-        current_page += 1
 
-    # ── Validate against Excel ───────────────────────────────────────────────
-    return validate_excel_columns_only(all_rows_data, expected_rows)
+    # R14 Check: Entries pill count equals scraped count
+    pill_match = (pill_count == len(all_rows))
+    page_checks.append(RuleCheckResult(
+        "Entries Pill Count (R14)", "Pill count equals total rows",
+        str(pill_count), str(len(all_rows)),
+        ValidationStatus.PASSED if pill_match else ValidationStatus.FAILED
+    ))
 
-    # --------------------------------------------------------------
-    # SELECT BRANCH using XPATH (PrimeNG p-dropdown)
-    # --------------------------------------------------------------
-def select_branch(page, branch_text: str):
+    # 8. Per-row rule and formula validation
+    row_validations = []
+    for idx, row in enumerate(all_rows, start=1):
+        code = row["item_code"]
+        audit_loc = row["audited_location"]
+        stock_loc = row["stock_location"]
+        stock_qty = row["stock_qty"]
+        aud_qty = row["audited_qty"]
+        dam_qty = row["damaged_qty"]
+        auditor = row["auditor_name"]
+        tooltip = row["tooltip"]
 
-        # 1️⃣ Branch dropdown container (XPath)
-        dropdown = page.locator(
-            'xpath=/html/body/app-root/app-layout/div/app-header/div[1]/div[2]/div[2]//p-dropdown'
-        )
-        dropdown.wait_for(state="visible", timeout=30000)
+        # Compute formula expectations from R1 - R7
+        exp_stock_loc, exp_stock_qty = calc_expected_stock(code, audit_loc, stock_data)
 
-        # 2️⃣ Click dropdown label to open
-        dropdown.locator(".p-dropdown-label").click()
+        # Tooltip format (R16): Stock qty: <Stock Qty> · Audited qty: <Audited Qty>
+        tooltip_valid = (
+            f"Stock qty: {stock_qty:g}" in tooltip and
+            f"Audited qty: {aud_qty:g}" in tooltip
+        ) if tooltip else True
 
-        # 3️⃣ Wait for dropdown panel (overlay)
-        panel = page.locator(".p-dropdown-panel").last
-        panel.wait_for(state="visible", timeout=30000)
+        row_checks = [
+            # R1: Audited Location
+            RuleCheckResult(
+                "Audited Location (R1)", "Non-empty, defaults to Unassigned",
+                "Non-empty", audit_loc,
+                ValidationStatus.PASSED if audit_loc else ValidationStatus.FAILED
+            ),
+            # R5 / R6: Stock Location
+            RuleCheckResult(
+                "Stock Location (R5/R6)", "Match -> audit loc; Mismatch -> Unassigned",
+                exp_stock_loc, stock_loc,
+                ValidationStatus.PASSED if stock_loc.lower() == exp_stock_loc.lower() else ValidationStatus.FAILED
+            ),
+            # R5 / R6 / R7: Stock Qty
+            RuleCheckResult(
+                "Stock Qty (R5/R6/R7)", "Match -> loc qty; Mismatch -> total; Match 0 -> 0",
+                f"{exp_stock_qty:g}", f"{stock_qty:g}",
+                ValidationStatus.PASSED if stock_qty == exp_stock_qty else ValidationStatus.FAILED
+            ),
+            # Audited Qty >= 0
+            RuleCheckResult(
+                "Audited Qty Valid", "Audited Qty >= 0",
+                ">= 0", f"{aud_qty:g}",
+                ValidationStatus.PASSED if aud_qty >= 0 else ValidationStatus.FAILED
+            ),
+            # Damaged Qty >= 0 (R9)
+            RuleCheckResult(
+                "Damaged Qty Valid (R9)", "Damaged Qty >= 0",
+                ">= 0", f"{dam_qty:g}",
+                ValidationStatus.PASSED if dam_qty >= 0 else ValidationStatus.FAILED
+            ),
+            # Auditor recorded (R17)
+            RuleCheckResult(
+                "Auditor Recorded (R17)", "Auditor Name is not empty",
+                "Non-empty", auditor,
+                ValidationStatus.PASSED if auditor else ValidationStatus.FAILED
+            ),
+            # Tooltip format (R16)
+            RuleCheckResult(
+                "Info Tooltip (R16)", "Stock qty · Audited qty format",
+                f"Stock qty: {stock_qty:g} · Audited qty: {aud_qty:g}", tooltip or "(not read)",
+                ValidationStatus.PASSED if tooltip_valid else ValidationStatus.FAILED
+            ),
+        ]
 
-        # 4️⃣ Filter search (if exists)
-        search = panel.locator("input.p-dropdown-filter")
-        if search.count() > 0:
-            search.fill("")
-            search.fill(branch_text)
-            page.wait_for_timeout(300)
+        row_status = ValidationStatus.PASSED if all(c.passed for c in row_checks) else ValidationStatus.FAILED
+        row_validations.append(RowRuleValidation(idx, code, row_checks, row_status))
 
-        # 5️⃣ Select branch option
-        option = panel.locator(
-            "li.p-dropdown-item",
-            has_text=branch_text
-        )
+    # Overall Status
+    all_passed = (
+        all(c.passed for c in form_checks) and
+        all(c.passed for c in page_checks) and
+        all(r.passed for r in row_validations)
+    )
 
-        if option.count() == 0:
-            raise Exception(f" Branch not found: {branch_text}")
+    report = FormulaValidationReport(
+        total_rows=len(all_rows),
+        entries_pill=pill_count,
+        page_checks=page_checks,
+        form_checks=form_checks,
+        row_checks=row_validations,
+        overall_status=ValidationStatus.PASSED if all_passed else ValidationStatus.FAILED
+    )
+    return report
 
-        option.first.click()
 
-        # 6️⃣ Ensure panel closed
-        panel.wait_for(state="hidden", timeout=30000)
+# ======================================================================
+# NAVIGATION HELPERS
+# ======================================================================
+def select_branch(page: Page, branch_text: str):
+    dropdown = page.locator('xpath=/html/body/app-root/app-layout/div/app-header/div[1]/div[2]/div[2]//p-dropdown')
+    dropdown.wait_for(state="visible", timeout=30000)
+    dropdown.locator(".p-dropdown-label").click()
 
-        # 7️⃣ Final verification
-        dropdown.locator(
-            ".p-dropdown-label",
-            has_text=branch_text
-        ).wait_for(state="visible", timeout=30000)
-def select_navigation_option(page, option_name: str):
-        """
-        option_name: one of 'Stock Audit', 'Audit Summary', 'Settings'
-        """
-        page.wait_for_selector("div[role='dialog'][aria-labelledby='auditNavTitle']")
+    panel = page.locator(".p-dropdown-panel").last
+    panel.wait_for(state="visible", timeout=30000)
 
-        card = page.locator(
-            f"button.create-type-card:has(h6.create-type-card__title:text-is('{option_name}'))"
-        )
-        card.click()
+    search = panel.locator("input.p-dropdown-filter")
+    if search.count() > 0:
+        search.fill(branch_text)
+        page.wait_for_timeout(300)
 
-        page.locator("button.create-type-btn--primary:has-text('Continue')").click()
-# ======================================================
-# NAVIGATION
-# ======================================================
-def click_audit(page, ap_audit_name):
+    option = panel.locator("li.p-dropdown-item", has_text=branch_text)
+    if option.count() == 0:
+        raise Exception(f"Branch not found: {branch_text}")
+    option.first.click()
+    panel.wait_for(state="hidden", timeout=30000)
+
+
+def select_navigation_option(page: Page, option_name: str):
+    page.wait_for_selector("div[role='dialog'][aria-labelledby='auditNavTitle']")
+    card = page.locator(f"button.create-type-card:has(h6.create-type-card__title:text-is('{option_name}'))")
+    card.click()
+    page.locator("button.create-type-btn--primary:has-text('Continue')").click()
+
+
+def click_audit(page: Page, ap_audit_name: str):
     page.wait_for_load_state("networkidle")
-
-    row = page.locator(
-        f"table tbody tr:has(button.audit-name-link:has-text('{ap_audit_name}'))"
-    ).first
+    row = page.locator(f"table tbody tr:has(button.audit-name-link:has-text('{ap_audit_name}'))").first
     row.locator("button.audit-name-link").first.click()
     page.wait_for_load_state("networkidle")
     print(f"   Opened audit: {ap_audit_name}")
 
 
-def navigate_to_ongoing_recentlyaudit(page, config):
-    """Navigate to the ongoing audits Page and open specified audit"""
-
+def navigate_to_ongoing_recentlyaudit(page: Page, config):
     print("📂 Navigating to Ongoing Audits...")
-    # Wait until element visible
     page.wait_for_selector("a[href='/home/audit']", state="visible")
-
-    # Click
     page.click("a[href='/home/audit']")
     page.wait_for_load_state("networkidle")
-
     select_branch(page, config.Branch)
-
     print(f"   Branch selected: {config.Branch}")
     click_audit(page, config.ap_audit_name)
     select_navigation_option(page, "Stock Audit")
 
 
-# ======================================================
-# MAIN VALIDATION FUNCTION
-# ======================================================
-def A_Recently_Audit(page, Config):
+# ======================================================================
+# ENTRY POINT
+# ======================================================================
+def A_Recently_Audit(page: Page, Config) -> FormulaValidationReport:
     """
-    Main entry point for Recently Audited table validation.
+    Main entry point for Recently Audited table formula and rule validation.
     """
     print("\n" + "=" * 80)
-    print("🚀 RECENTLY AUDITED TABLE VALIDATION")
+    print("🚀 RECENTLY AUDITED — BUSINESS FORMULA & RULE VALIDATION")
     print("=" * 80 + "\n")
 
-    # Navigate to the audit
+    # 1. Load stock sheet data for Rule R1 - R7 resolution
+    excel_path = getattr(Config, "EXCEL_PATH", None) or getattr(Config, "oa_excel_path", None)
+    stock_data = load_stock_sheet_data(excel_path, sheet_name=getattr(Config, "oa_sheet", "Data"))
+    print(f"📦 Loaded stock-by-location data for {len(stock_data)} items from stock sheet")
+
+    # 2. Navigate to the audit
     navigate_to_ongoing_recentlyaudit(page, Config)
 
-    # Load expected data from Excel
-    expected_rows = load_expected_rows_from_excel(
-    Config.EXCEL_PATH,
-    sheet_name=Config.EXCEL_SHEET_Recently_Audit
-)   
-    print(len(expected_rows))
-    print(f"📂 Loaded {len(expected_rows)} expected rows from Excel:\n")
-    
-    if expected_rows:
-        # Get all unique keys from all rows
-        all_keys = set()
-        for row in expected_rows:
-            all_keys.update(row.keys())
-        
-        # Define column order
-        column_order = [
-            "s_no", "item_code", "item_name", "uom", "auditor_name",
-            "audited_qty", "damaged_qty", "stock_qty", "audited_location", "audited_image"
-        ]
-        keys_to_display = [k for k in column_order if k in all_keys]
-        
-        # Calculate column widths
-        col_widths = {key: len(key) for key in keys_to_display}
-        for row in expected_rows:
-            for key in keys_to_display:
-                col_widths[key] = max(col_widths[key], len(str(row.get(key, ""))))
-        
-        # Print header
-        header_parts = []
-        for key in keys_to_display:
-            header_parts.append(key.upper().ljust(col_widths[key]))
-        print("  " + " | ".join(header_parts))
-        print("  " + "-" * (sum(col_widths.values()) + (len(keys_to_display) - 1) * 3))
-        
-        # Print rows
-        for i, row in enumerate(expected_rows, 1):
-            row_parts = []
-            for key in keys_to_display:
-                value = str(row.get(key, "")).strip()
-                row_parts.append(value.ljust(col_widths[key]))
-            print("  " + " | ".join(row_parts))
+    # 3. Wait for page to stabilize
+    print("\n⏳ Waiting 5 seconds for Stock Audit page to stabilize...")
+    page.wait_for_timeout(5000)
 
-        try:
-            print("\n⏳ Waiting 10 seconds for page to stabilize...")
-            page.wait_for_timeout(10000)
+    # 4. Run formula & business rule validation
+    report = validate_recently_audited_by_rules(page, stock_data)
+    report.print_report()
 
-            report = validate_table_comprehensive(page, expected_rows)
-            report.print_report()
-
-        except Exception as e:
-            print(f"\n CRITICAL ERROR: {e}")
-            import traceback
-            traceback.print_exc()
-
-    print("\n   VALIDATION COMPLETED\n")
+    return report

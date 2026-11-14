@@ -20,19 +20,20 @@ class Config:
 
         # ── Conditional Login Control ─────────────────────────────
     USE_CUSTOM_LOGIN = True
-
+    company_name = "Test_TuddeCompany_16/10"
     if USE_CUSTOM_LOGIN:
-        email = "laveuheizaku-2683@yopmail.com"
+        email = "tuddefonugu-3882@yopmail.com"
         password = "12345678"
     else:
         email = None
         password = None
 
     browsername = "chrome"
-    environments = "staging" # production, staging, development
+    environments = "production" # production, staging, development
 
     Branch = "DE"
-    run_create_group = False    # QA_GRP_1112_2214 (Unit) was created on staging on 11-12 22:15
+    Group_Name = "QA_GRP_1112_2214"
+    run_create_group = True    # QA_GRP_1112_2214 (Unit) was created on staging on 11-12 22:15
     run_update_group = False    # update the saved group named group_name so it matches backend/Config.py
     run_location_setup = False
     zones  = ["SA"]
@@ -50,8 +51,7 @@ class Config:
 
     EXCEL_FILE: str = os.environ.get(
         "IMPORT_EXCEL_FILE",
-        r"C:\Users\HP\Videos\main_qexcel.xlsx"
-        #r"C:\Users\dines\3D Objects\main_qexcel.xlsx"
+        r"C:\Users\dines\3D Objects\main_qexcel.xlsx"
     )
     run_add_item = True          # ITM0039: in the group, not on sheet Data -> the audit's excess item
 
@@ -78,6 +78,9 @@ class Config:
 
 if __name__ == "__main__":
 
+    if hasattr(Config, "Group_Name") and Config.Group_Name:
+        GroupConfig.group_name = Config.Group_Name
+
     with sync_playwright() as p:
 
         browser, page = login(
@@ -85,7 +88,8 @@ if __name__ == "__main__":
             browser_name=Config.browsername,
             environment=Config.environments,
             email=Config.email,
-            password=Config.password
+            password=Config.password,
+            company_name=Config.company_name
         )
         if Config.run_location_setup:
              settings(page, Config)

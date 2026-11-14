@@ -2,7 +2,7 @@ import re
 import time
 
 from audit.A_audit_Summary import wait_spinner
-
+from login.popup_handler import detect_feedback
 
 
 # --------------------------------------------------------------
@@ -113,7 +113,7 @@ def Ad_hoc_Audit(page, Config):
         input_selector.fill(ap_audit_name)
         submit_button = page.get_by_role("button", name="Create Audit", exact=True)
         submit_button.click()
-
+        detect_feedback(page)
 
         # --------------------------------------------------------------
     # SELECT MANUAL TAB

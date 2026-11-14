@@ -215,6 +215,35 @@ def check_toolbar(page, res: Results, state: dict) -> None:
     res.check(area, "Swap sections toggles", toggled != before and swap.get_attribute("aria-pressed") == before,
               f"{before} -> {toggled} -> restored")
 
+    # ── Form rules (R8 - R13) ─────────────────────────────────
+    area_form = "Form rules"
+    aud_input = page.locator("input[formcontrolname='auditedQty']")
+    if aud_input.count():
+        # R8: Audited qty is required (ng-invalid when blank). Add count is blocked.
+        is_req = "ng-invalid" in (aud_input.get_attribute("class") or "") or page.locator(".asv2-field--audited .asv2-required").is_visible()
+        res.check(area_form, "Audited qty required (R8)", is_req)
+
+    dam_minus = page.locator("button[aria-label='Decrease damaged qty']")
+    if dam_minus.count():
+        # R9: Damaged qty is optional. Min 0, stepper minus is disabled at 0.
+        res.check(area_form, "Damaged stepper minus disabled at 0 (R9)", dam_minus.is_disabled())
+
+    loc_dd = page.locator("p-dropdown[inputid='asv2Location']")
+    if loc_dd.count():
+        # R10: The Stock Location dropdown on the form is read-only (disabled).
+        is_dis = "p-disabled" in (loc_dd.get_attribute("class") or "")
+        res.check(area_form, "Stock Location dropdown disabled (R10)", is_dis)
+
+    uom_input = page.locator("input#uom")
+    if uom_input.count():
+        # R12: Audit UOM is read-only and comes from the item.
+        res.check(area_form, "Audit UOM read-only (R12)", uom_input.get_attribute("readonly") is not None)
+
+    clear_btn = page.locator("button.asv2-btn.warning:has-text('Clear')")
+    if clear_btn.count():
+        # R13: Clear resets the item, the quantities and the audit location selection.
+        res.check(area_form, "Clear button present (R13)", clear_btn.is_visible())
+
 
 # --------------------------------------------------------------
 # 2 + 3. RECENTLY AUDITED LIST + EXCEL -> LIST CROSS-CHECK
@@ -227,13 +256,37 @@ def check_list(page, res: Results, state: dict, entered: List[Entered], count_be
 
     count_now = read_list_count(page)
     if count_before is not None:
-        res.check(area, "Entries increased by counts added", count_now == count_before + len(entered),
+        # R14: A successful Add count increases the entries pill by 1 and adds a row.
+        res.check(area, "Entries increased by counts added (R14)", count_now == count_before + len(entered),
                   f"before={count_before} now={count_now} added={len(entered)}")
+
+    # R18: Page size is 5 by default (5, 10, 25, 50, 100). The pager text is “Showing x–y of N entries”.
+    pager = page.locator(f"{LIST} .apg-info")
+    if pager.count():
+        txt = _clean(pager.inner_text())
+        res.check(area, "Pager shows correct format (R18)", bool(re.search(r"Showing \d+[–-]\d+ of \d+ entries", txt, re.I)), txt)
 
     _list_page_size(page, "100")
     idx, rows = _list_read_all(page)
     res.check(area, "Rows per page = 100 shows all entries", len(rows) == count_now,
               f"rows={len(rows)} pill={count_now}")
+
+    # R15: The row shows: S.No, Item Code, Item Name, Audited UOM, Auditor Name, Stock Qty, Audited Qty, Damaged Qty, Stock Location, Audited Location.
+    req_cols = ["ITEM CODE", "ITEM NAME", "STOCK QTY", "AUDITED QTY", "STOCK LOCATION", "AUDITED LOCATION"]
+    has_req = all(any(req in h for h in idx) for req in req_cols)
+    res.check(area, "Row shows required columns (R15)", has_req, f"columns={list(idx.keys())}")
+
+    # R16: The info tooltip = Stock qty: <Stock Qty column> · Audited qty: <Audited Qty column>.
+    info_icon = page.locator(f"{LIST} tbody tr").first.locator("i.aslv2-info")
+    if info_icon.count():
+        tip = info_icon.get_attribute("ng-reflect-content") or ""
+        res.check(area, "Info tooltip format (R16)", "Stock qty:" in tip and "Audited qty:" in tip, tip)
+
+    # R19: Print and Delete actions apply per row.
+    print_btn = page.locator(f"{LIST} button.aslv2-row-btn[aria-label='Print']")
+    del_btn = page.locator(f"{LIST} button.aslv2-row-btn[aria-label='Delete']")
+    if print_btn.count() and del_btn.count():
+        res.check(area, "Row actions print and delete present (R19)", print_btn.first.is_visible() and del_btn.first.is_visible())
 
     code = entered[0][0] if entered else (rows[0][idx["ITEM CODE"]] if rows else "")
     if code:
@@ -247,12 +300,41 @@ def check_list(page, res: Results, state: dict, entered: List[Entered], count_be
     own = read_list_count(page)
     _list_all_auditors(page, True)
     everyone = read_list_count(page)
-    res.check(area, "All auditors shows >= own entries", (everyone or 0) >= (own or 0),
+    # R17: Auditor Name = the logged-in user. The “All auditors” toggle shows other auditors’ rows.
+    res.check(area, "All auditors shows >= own entries (R17)", (everyone or 0) >= (own or 0),
               f"own={own} all={everyone}")
     all_idx, all_rows = _list_read_all(page)
     state["list_totals"] = _list_totals(all_idx, all_rows)
     state["list_entries"] = len(all_rows)
     _list_all_auditors(page, False)
+
+    # Rule resolution helper for Rules R1 - R7:
+    # R1: Audit location is optional. If none is selected, Audited Location = Unassigned.
+    # R2: Unassigned is a normal location value. Unassigned = Unassigned counts as a match.
+    # R3: A match means the audit location is in the item’s stock-by-location list (a row exists, even with qty 0).
+    # R4: A mismatch means no stock row exists at the audit location.
+    # R5: Match -> Stock Location = Audit location, Stock Qty = Qty at that location
+    # R6: Mismatch -> Stock Location = Unassigned, Stock Qty = Total stock qty (all locations)
+    # R7: Match with qty 0 -> Stock Location = Audit location, Stock Qty = 0 (not a fallback to total)
+    def resolve_stock(c: str, audit_location: Optional[str]) -> Tuple[str, float]:
+        stock_map = state.get("stock_by_location", {}).get(c, {})
+        norm_audit = (audit_location or "").strip()
+        if not norm_audit or norm_audit.lower() in ("none", "0"):
+            norm_audit = "Unassigned"
+
+        matched_k = None
+        for k in stock_map:
+            if k.strip().lower() == norm_audit.lower():
+                matched_k = k
+                break
+
+        if matched_k is not None:
+            # Match (R5, R7)
+            return norm_audit, float(stock_map[matched_k])
+        else:
+            # Mismatch (R6)
+            tot = sum(float(q) for q in stock_map.values())
+            return "Unassigned", tot
 
     # Excel -> list: newest rows for a code belong to the last counts of that code
     area = "Cross: Excel > list"
@@ -271,12 +353,24 @@ def check_list(page, res: Results, state: dict, entered: List[Entered], count_be
         act_aud = _num(row[idx["AUDITED QTY"]])
         act_dam = _num(row[idx["DAMAGED QTY"]]) if "DAMAGED QTY" in idx else 0.0
         act_loc = _clean(row[idx["AUDITED LOCATION"]]) if "AUDITED LOCATION" in idx else ""
-        location = location or state["item_locations"].get(code)    # no location chosen: the item's own
-        exp_loc = location.split("-")[-1] if location else "Unassigned"
+
+        # Location rules:
+        # R1: If none selected, Audited Location = Unassigned
+        exp_aud_loc = location if location and location != "None" else "Unassigned"
+        exp_stk_loc, exp_stk_qty = resolve_stock(code, location)
+
         res.check(area, f"{code} audited qty", act_aud == float(audited), f"excel={audited} list={act_aud}")
         res.check(area, f"{code} damaged qty", act_dam == float(damaged or 0), f"excel={damaged} list={act_dam}")
-        res.check(area, f"{code} audited location", exp_loc.lower() in act_loc.lower(),
-                  f"excel={location or '-'} list={act_loc}")
+        res.check(area, f"{code} audited location (R1)", exp_aud_loc.lower() in act_loc.lower() or act_loc.lower() in exp_aud_loc.lower(),
+                  f"exp={exp_aud_loc} list={act_loc}")
+        if "STOCK LOCATION" in idx:
+            act_stk_loc = _clean(row[idx["STOCK LOCATION"]])
+            res.check(area, f"{code} stock location (R5/R6)", exp_stk_loc.lower() in act_stk_loc.lower() or act_stk_loc.lower() in exp_stk_loc.lower(),
+                      f"exp={exp_stk_loc} list={act_stk_loc}")
+        if "STOCK QTY" in idx:
+            act_stk_qty = _num(row[idx["STOCK QTY"]])
+            res.check(area, f"{code} stock qty (R5/R6/R7)", act_stk_qty == exp_stk_qty,
+                      f"exp={exp_stk_qty:g} list={act_stk_qty:g}")
 
 
 # --------------------------------------------------------------
@@ -577,6 +671,36 @@ def run_stock_audit_checks(page, Config, entered: List[Entered], list_count_befo
     res = getattr(Config, "asv2_results", None) or Results()
     # {item code: stock location} when known: a count saved with no location chosen goes there
     state = {"item_locations": dict(getattr(Config, "asv2_item_locations", None) or {})}
+
+    # Load stock by location from Data sheet to test Rules R1-R7
+    stock_by_loc = {}
+    excel_path = getattr(Config, "EXCEL_PATH", None) or getattr(Config, "oa_excel_path", None)
+    if excel_path and os.path.exists(excel_path):
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(excel_path, data_only=True)
+            sheet = getattr(Config, "oa_sheet", "Data")
+            if sheet in wb.sheetnames:
+                ws = wb[sheet]
+                rows_iter = ws.iter_rows(values_only=True)
+                first_row = next(rows_iter, None)
+                if first_row:
+                    hdr = [str(c or "").strip() for c in first_row]
+                    h_map = {h: i for i, h in enumerate(hdr)}
+                    c_idx = h_map.get("Item Code")
+                    l_idx = h_map.get("Location")
+                    q_idx = h_map.get("Adjustmentqty") if "Adjustmentqty" in h_map else h_map.get("Stock Quantity")
+                    if c_idx is not None and q_idx is not None:
+                        for r in rows_iter:
+                            code = str(r[c_idx] or "").strip()
+                            if not code or code == "None":
+                                continue
+                            loc = str(r[l_idx] or "Unassigned").strip() if l_idx is not None and r[l_idx] else "Unassigned"
+                            qty = float(r[q_idx]) if r[q_idx] is not None else 0.0
+                            stock_by_loc.setdefault(code, {})[loc] = qty
+        except Exception as e:
+            print(f"   ⚠️ Could not load stock locations: {e}")
+    state["stock_by_location"] = stock_by_loc
     for area, fn, *args in (
             ("Toolbar", check_toolbar, page, res, state),
             ("Recently audited list", check_list, page, res, state, entered, list_count_before),

@@ -41,29 +41,29 @@ FAST_MODE = False
 
 class Config:
     USE_CUSTOM_LOGIN = True  # Set to True to use custom login credentials
-    company_name = ""
+    company_name = "Test_TuddeCompany_16/10"
     if USE_CUSTOM_LOGIN:
-        email = "laveuheizaku-2683@yopmail.com"
+        email = "tuddefonugu-3882@yopmail.com"
         password = "12345678"
     else:
         email = None
         password = None
 
-    email2 = "croussoffoittube-8855@yopmail.com"  # Auditor 2 credentials
-    password2 = "26KaHU9x"
+    email2 = "vigelluppeutru-1233@yopmail.com"  # Auditor 2 credentials
+    password2 = "2ugR20Bc"
 
     browsername = "chrome"
-    environments = "staging"  # production, staging, development
+    environments = "production"  # production, staging, development
     Branch = "DE"
 
-    Audit_Owner = "Dinesh B"   # staging user (laveuheizaku…)
-    Auditor1 = "Dinesh B"
-    Auditor2 = "croussoff"     # staging user of email2 (croussoffoittube-8855…)
+    Audit_Owner = "Test_Tudde"   #  user 
+    Auditor1 = "Test_Tudde"
+    Auditor2 = "Vigellup B"     #  user of email2 
     Group_Name = "QA_GRP_1112_2214"   # created by inventory/Inventory.py (backend/Config.py group_name)
     Audit_mode = "Ad_hoc"  # "Ad_hoc" or "Audit_plan"
     Audit_Type = "Complete Audit"  # Complete Count, Cycle Count, Complete Audit, Partial Audit, Investigation Audit
     SD_audit_type = "Dynamic"  # "Static" or "Dynamic"
-    ap_audit_name = "QA_SUM_1113_1302"
+    ap_audit_name = "QA_SUM_1113_21"
     frequency = "daily"  # "daily", "weekly", "monthly", "manual"
     Day_s = 30
     Target__Day = "Thursday"
@@ -88,7 +88,7 @@ class Config:
     # -------------------------------------------------------
     AUDIT_MAPPING_TYPE = "Random"  # "Random", "By Category", "By Storage"
     
-    EXCEL_PATH = r"C:\Users\HP\Videos\main_qexcel.xlsx"
+    EXCEL_PATH = r"C:\Users\dines\3D Objects\main_qexcel.xlsx"
     EXCEL_SHEET_AUDITOR_MAPPING = "AUDITOR_MAPPING"
     EXCEL_auditor_col = "Auditor"
     EXCEL_category_col = "Category"
@@ -149,7 +149,7 @@ class Config:
     EXCEL_CODE_COL2 = "code"
     EXCEL_AUDITED_COL2 = "audited"
     EXCEL_DAMAGED_COL2 = "damaged"
-    run_stock_audit2 = True
+    run_stock_audit2 = False
 
     # Shared / Base variables for auditors
     
@@ -169,13 +169,16 @@ class Config:
     # Audit Summary checks on ap_audit_name (A_audit_Summary.py; read-only; Ongoing Audits or Audit History)
     run_A_audit_Summary = True
     summary_ui_validation = True             # UI validation: required fields, values and formulas (data block in A_audit_Summary.py)
-    summary_excel_compare = False            # rows of each filter badge vs the 'auditSummary' Excel sheet (made for test1234_1)
+    summary_excel_compare = True            # rows of each filter badge vs the 'auditSummary' Excel sheet (made for test1234_1)
     summary_move_not_found = False           # Complete Audit > Move to Not Found > Proceed to Resolution, then check it
                                              # (spec 03) and validate again — CHANGES the audit: it goes In Resolution
     EXCEL_SHEET_audit_Summary = "auditSummary"
     FILTER_COLUMN = "filter"
     run_A_Recently_Audit = False
     EXCEL_SHEET_Recently_Audit = "Recently_Audit"
+    run_A_audit_Summary_history = True       # Post-completion: Audit History validation (UI + Excel + PDF)
+    summary_history_ui_validation = True     # Audit History: UI fields, status Completed, charts, read-only
+    summary_history_excel_compare = False    # Audit History: set True if comparing badges against Excel sheet
 
     # Finish → Complete on ap_audit_name, step by step (finish_complete_flow.py; finish_flow sheet:
     # declaration note + Accept / Recount / Investigate + recount qty + remarks per item). Step 10 closes the audit.
@@ -191,7 +194,7 @@ class Config:
     EXCEL_SHEET_finish_flow = "finish_flow"
 
     # Report folder of the Audit Summary UI validation and the Audit Settings tests
-    e2e_output_dir = r"C:\Users\HP\Videos\QA_E2E"
+    e2e_output_dir = r"C:\Users\dines\3D Objects\QA_E2E"
 
     # Audit Settings page test cases (TC-SET-xx); settings + stock sheet are restored afterwards
     run_settings_tests = False
@@ -323,6 +326,12 @@ if __name__ == "__main__":
             print(" Step 10 resolution_summary skipped")
         if flow:
             flow.report(Config)
+        # ── Post-Complete Validation: Audit History (UI + Excel + PDF) ──
+        if getattr(Config, "run_A_audit_Summary_history", False):
+            print("\n" + "=" * 70)
+            print(" AUDIT HISTORY POST-COMPLETION VALIDATION (UI + Excel + PDF)")
+            print("=" * 70)
+            A_audit_Summary(page, Config, is_history=True)
         if Config.run_settings_tests:
             run_settings_tests(page, Config)
         else:

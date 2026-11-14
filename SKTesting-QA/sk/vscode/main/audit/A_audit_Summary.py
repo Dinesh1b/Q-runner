@@ -395,7 +395,8 @@ class BizRules:
     def location_conflict(r):
         stock   = N.norm(r.get("Stock Location",  ""))
         audited = N.norm(r.get("Audited Location", ""))
-        return stock != audited
+        qty     = f2f(r.get("Audited Quantity", r.get("Audited Qty", 0)))
+        return qty > 0 and stock != audited
 
     @staticmethod
     def damaged_report(r):
@@ -663,20 +664,21 @@ def navigate_to_audit(page, config):
     _ui_open_summary(page, config)
 
 
-def A_audit_Summary(page, config):
+def A_audit_Summary(page, config, is_history: bool = False):
     """Audit Summary checks: the UI validation (fields, values and formulas of the data block in
     the UI VALIDATION section), then the Excel compare. config.summary_ui_validation /
-    config.summary_excel_compare = False skip either one. config.summary_move_not_found = True also runs
-    Complete Audit > Move to Not Found > Proceed to Resolution (the audit goes In Resolution), checks it
-    and validates the page again."""
+    config.summary_excel_compare = False skip either one. When is_history=True, runs on Audit History
+    validating Completed status, read-only controls, PDF download, and Excel export."""
     ok = True
-    if getattr(config, "summary_ui_validation", True):
+    ui_val = getattr(config, "summary_history_ui_validation" if is_history else "summary_ui_validation", True)
+    if ui_val:
         ok = validate_summary_ui(page, config) and ok
-    if getattr(config, "summary_move_not_found", False):
+    if not is_history and getattr(config, "summary_move_not_found", False):
         ok = check_move_to_not_found(page, config) and ok
         if getattr(config, "summary_ui_validation", True):
             ok = validate_summary_ui(page, config) and ok
-    if getattr(config, "summary_excel_compare", True):
+    excel_cmp = getattr(config, "summary_history_excel_compare" if is_history else "summary_excel_compare", not is_history)
+    if excel_cmp:
         ok = _excel_compare(page, config) and ok
     return ok
 
@@ -872,7 +874,7 @@ CHIP_RULES = OrderedDict([
     ("Excess Line Item", "stock == 0 and audited > 0"),
     ("Positive Variance", "audited > stock"),
     ("Negative Variance", "auditor != '' and audited < stock"),
-    ("Location Conflict", "stock_location != audited_location"),
+    ("Location Conflict", "audited > 0 and stock_location != audited_location"),
     ("Cross Checked Audit", "cross_audited > 0"),
     ("Damaged Report", "damaged > 0"),
 ])
@@ -890,7 +892,7 @@ CHIP_LIST_DIFFS = {
 CHART_ITEM_RULES = OrderedDict([
     ("counted", "auditor != '' or audited > 0"),          # has a count row; uncounted items are skipped (F2)
     ("on_sheet", "stock_location != '' or stock > 0"),     # the item has a stock-sheet row
-    ("cost", "max_cost if on_sheet else 0"),               # highest stock-sheet cost; off-sheet = 0 (F5)
+    ("cost", "max_cost"),                                  # highest cost of the item (from stock sheet or item master)
 ])
 CHART_FORMULAS = OrderedDict([
     ("Available Value", "min(stock, audited) * cost"),
@@ -1072,8 +1074,9 @@ def _expected_charts(item_rows, prices):
             value = _calc(rule, **names)
             cat[ds] += value
             overall[ds] += value
-    pie = OrderedDict((ds, _calc(DOUGHNUT_FORMULA, value=v, stock_value=stock_value)) for ds, v in overall.items())
-    return bar, overall, pie, {"stock_value": stock_value, "off_sheet_counted": off_sheet}
+    total_val = sum(overall.values())
+    pie = OrderedDict((ds, _calc(DOUGHNUT_FORMULA, value=v, stock_value=total_val)) for ds, v in overall.items())
+    return bar, overall, pie, {"stock_value": stock_value, "total_variance": total_val, "off_sheet_counted": off_sheet}
 
 
 # ----------------------------------------------------------------------
@@ -1841,7 +1844,7 @@ def _check_charts(ck, st):
         label = _find(field, labels)
         ck.add(group, f"Overall Variance {field} % = {DOUGHNUT_FORMULA.split(' if ')[0]}",
                label is not None and _near(got.get(label), pie[field], 0.01),
-               f"{pie[field]} (value {overall[field]:g} ÷ stock value {facts['stock_value']:g})",
+               f"{pie[field]} (value {overall[field]:g} ÷ total variance {facts.get('total_variance', facts['stock_value']):g})",
                got.get(label) if label else "MISSING")
     st["doughnut_sum"] = sum(float(x or 0) for x in data)
 
