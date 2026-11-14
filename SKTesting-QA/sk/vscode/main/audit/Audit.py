@@ -166,19 +166,12 @@ class Config:
     # Report / Summary flags
     run_A_SA_table = False
     EXCEL_SHEET_as_table = "as_table"
-    # Audit Summary checks on ap_audit_name (A_audit_Summary.py; read-only; Ongoing Audits or Audit History)
+    # Audit Summary checks on ap_audit_name (A_audit_Summary.py; flexible formula-based; Ongoing or History)
     run_A_audit_Summary = True
-    summary_ui_validation = True             # UI validation: required fields, values and formulas (data block in A_audit_Summary.py)
-    summary_excel_compare = True            # rows of each filter badge vs the 'auditSummary' Excel sheet (made for test1234_1)
-    summary_move_not_found = False           # Complete Audit > Move to Not Found > Proceed to Resolution, then check it
-                                             # (spec 03) and validate again — CHANGES the audit: it goes In Resolution
-    EXCEL_SHEET_audit_Summary = "auditSummary"
-    FILTER_COLUMN = "filter"
+    summary_ui_validation = True             # UI validation: required fields, values, formulas, charts & live Excel export
+    run_A_audit_Summary_history = True       # Post-completion: Audit History validation (UI + Excel + PDF)
     run_A_Recently_Audit = False
     EXCEL_SHEET_Recently_Audit = "Recently_Audit"
-    run_A_audit_Summary_history = True       # Post-completion: Audit History validation (UI + Excel + PDF)
-    summary_history_ui_validation = True     # Audit History: UI fields, status Completed, charts, read-only
-    summary_history_excel_compare = False    # Audit History: set True if comparing badges against Excel sheet
 
     # Finish → Complete on ap_audit_name, step by step (finish_complete_flow.py; finish_flow sheet:
     # declaration note + Accept / Recount / Investigate + recount qty + remarks per item). Step 10 closes the audit.

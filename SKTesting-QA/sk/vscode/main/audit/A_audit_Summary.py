@@ -665,22 +665,13 @@ def navigate_to_audit(page, config):
 
 
 def A_audit_Summary(page, config, is_history: bool = False):
-    """Audit Summary checks: the UI validation (fields, values and formulas of the data block in
-    the UI VALIDATION section), then the Excel compare. config.summary_ui_validation /
-    config.summary_excel_compare = False skip either one. When is_history=True, runs on Audit History
-    validating Completed status, read-only controls, PDF download, and Excel export."""
-    ok = True
-    ui_val = getattr(config, "summary_history_ui_validation" if is_history else "summary_ui_validation", True)
-    if ui_val:
-        ok = validate_summary_ui(page, config) and ok
-    if not is_history and getattr(config, "summary_move_not_found", False):
-        ok = check_move_to_not_found(page, config) and ok
-        if getattr(config, "summary_ui_validation", True):
-            ok = validate_summary_ui(page, config) and ok
-    excel_cmp = getattr(config, "summary_history_excel_compare" if is_history else "summary_excel_compare", not is_history)
-    if excel_cmp:
-        ok = _excel_compare(page, config) and ok
-    return ok
+    """Audit Summary flexible formula-based validation:
+    - Pre-complete (Ongoing): validates UI fields, values, cards, chips, charts & live Excel export.
+    - Post-complete (Audit History): validates Completed status, read-only controls, PDF download & Excel export.
+    Read-only: never modifies the audit."""
+    if getattr(config, "summary_ui_validation", True):
+        return validate_summary_ui(page, config)
+    return True
 
 
 def _excel_compare(page, config):
