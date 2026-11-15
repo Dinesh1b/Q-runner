@@ -858,6 +858,28 @@ CARD_FORMULAS = OrderedDict([
     ("Damaged Quantity", ("damaged", "damaged * price")),
 ])
 
+# Auditor Insights (spec 01 §4): Σ of each formula over the report rows of one auditor (Summarize As = Auditor).
+# Names: as in CHIP_RULES plus price. Progress names: counted_rows (the auditor's rows with audited > 0),
+# completed (Completed Inventory), assigned_rows / assigned_stock (the auditor's stock-sheet rows and their
+# Σ stock: known from the Summary only when one auditor has every row). Status names: counted_rows, status.
+AUDITOR_FORMULAS = OrderedDict([
+    ("Completed Inventory", "audited"),          # damaged excluded
+    ("Audited Value", "audited * price"),        # spec 01 F4: the server's cost may differ from CostPrice
+    ("Damaged Value", "damaged * price"),
+])
+AUDITOR_PROGRESS_FORMULA = ("min(100, (counted_rows / assigned_rows * 25 if assigned_rows else 0)"
+                            " + (completed / assigned_stock * 75 if assigned_stock else 0))")
+AUDITOR_STATUS_RULE = ("status in ('In Progress', 'Completed') if counted_rows > 0"
+                       " else status in ('Yet to Start', 'Completed', 'Unknown')")   # Completed: the auditor finished
+# Per-auditor progress inputs come from the dialog's API response (returned, not shown; spec 01 §4):
+# counted_rows = AuditedCount, assigned_stock = AssignedInventoryCount, assigned_rows = the on-sheet rows the
+# auditor counted + RemainingCount (the assigned rows the auditor has not counted).
+AUDITOR_API = "GetAuditorSummary"
+# Random mapping (spec 01 §4): the stock rows nobody counted are split evenly, the remainder to the last auditor.
+# Names: uncounted (stock rows meeting RANDOM_UNCOUNTED), auditors, last (the last auditor of the dialog).
+RANDOM_UNCOUNTED = "stock > 0 and audited == 0"
+RANDOM_SLICE = "uncounted // auditors + (uncounted % auditors if last else 0)"
+
 # Count chips (spec 03 §3, count rules). Names: stock, audited, damaged, auditor ('' when none),
 # stock_location, audited_location ('' when blank or '-'), cross_audited.
 CHIP_RULES = OrderedDict([
@@ -974,6 +996,49 @@ def _blank(v):
     return "" if v in ("", "-", "--") else v
 
 
+_MONEY_NAMES = {"price", "cost", "max_cost", "value", "stock_value", "audited_val", "damaged_val"}
+
+
+def _show(expr, **names):
+    """A formula of the data block with the numbers put in: '(audited - stock) * price' -> '(13 - 10) * 100.00'.
+    Only the given names are replaced (name['key'] too, for dict values); quoted labels and keywords stay."""
+    def put(m):
+        name, sub = m.group(1), m.group(2)
+        if name not in names:
+            return m.group(0)
+        v = names[name]
+        if sub and isinstance(v, dict):
+            v = v.get(sub[2:-2])
+        elif sub or isinstance(v, (dict, list, set, tuple)):
+            return m.group(0)
+        if isinstance(v, str):
+            return repr(v)
+        if v is None or isinstance(v, bool):
+            return str(v)
+        return f"{float(v):.2f}" if name in _MONEY_NAMES else f"{float(v):.4f}".rstrip("0").rstrip(".")
+    return re.sub(r"(?<!['\w])([A-Za-z_]\w*)(\['[^']*'\])?(?!['\w])", put, expr)
+
+
+def _sample(items, n=6, sep=", "):
+    """The first n items joined, '(+k more)' after them."""
+    items = [str(x) for x in items]
+    return sep.join(items[:n]) + (f" (+{len(items) - n} more)" if len(items) > n else "")
+
+
+def _fmt_field(field, x):
+    """A report value as the screen shows it: money with 2 decimals, quantities signed, labels as they are."""
+    if isinstance(x, str) or x is None:
+        return str(x)
+    return f"{x:+.2f}" if "value" in _key(field) else f"{x:+g}"
+
+
+def _row_sample(field, rule, v, want):
+    """One row of a per-row formula: 'ITM2: (13 - 10) * 100.00 = +300.00', 'ITM9: 0 vs 10 → Negative'."""
+    if isinstance(want, str):
+        return f"{v['code']}: {v['audited']:g} vs {v['stock']:g} → {want}"
+    return f"{v['code']}: {_show(rule, **v)} = {_fmt_field(field, want)}"
+
+
 def _qn(v):
     """Number shown on screen ("+3", "1,234.5", "-" -> 0)."""
     m = re.match(r"^[-+]?\d+(\.\d+)?", _txt(v).replace(",", ""))
@@ -1042,6 +1107,46 @@ def _expected_progress(item_rows, stock_rows, cards):
              "stock_total": cards.get("Stock", 0.0)}
     progress = _calc(PROGRESS_FORMULA, **names)
     return progress, _calc(PROGRESS_LABEL, progress=progress), names
+
+
+def _expected_auditors(rows, prices, dialog_names):
+    """{dialog name: Σ of AUDITOR_FORMULAS over that auditor's report rows, counted_rows, codes}.
+    A row belongs to an auditor when the names contain each other (case, spaces ignored); a value is
+    None when a row has no price."""
+    vals = [_row_vals(r, prices) for r in rows]
+    out = OrderedDict()
+    for name in dialog_names:
+        k = _key(name)
+        mine = [v for v in vals if _key(v["auditor"]) and k and (_key(v["auditor"]) in k or k in _key(v["auditor"]))]
+        used = [v for v in mine if v["audited"] or v["damaged"]]          # rows that add to a figure
+        on_sheet = [v for v in mine if v["audited"] > 0 and v["stock"] > 0]
+        e = {"counted_rows": sum(1 for v in mine if v["audited"] > 0), "vals": used,
+             "on_sheet_counted": len(on_sheet), "on_sheet_stock": sum(v["stock"] for v in on_sheet)}
+        for field, rule in AUDITOR_FORMULAS.items():
+            e[field] = (None if "price" in rule and any(v["price"] is None for v in used)
+                        else sum(_calc(rule, **v) for v in used))
+        out[name] = e
+    return out
+
+
+def _api_records(body, key="auditorname"):
+    """The first list of objects in a JSON body whose objects have the key (case, punctuation ignored),
+    each object with its keys as _key() names."""
+    if isinstance(body, list) and body and isinstance(body[0], dict) and any(_key(k) == key for k in body[0]):
+        return [{_key(k): v for k, v in rec.items()} for rec in body if isinstance(rec, dict)]
+    for v in (body.values() if isinstance(body, dict) else body if isinstance(body, list) else []):
+        found = _api_records(v, key)
+        if found:
+            return found
+    return []
+
+
+def _api_auditor(records, name):
+    """The API record of the auditor shown as name (the dialog may shorten the name)."""
+    k = _key(name)
+    return next((rec for rec in records if k and _key(rec.get("auditorname")) == k), None) or next(
+        (rec for rec in records if k and _key(rec.get("auditorname")) and
+         (k in _key(rec.get("auditorname")) or _key(rec.get("auditorname")) in k)), None)
 
 
 def _expected_charts(item_rows, prices):
@@ -1530,11 +1635,13 @@ def _check_information(ck, st):
     total = next((v for k, v in row.items() if "totallineitem" in _key(k)), "")
     m = re.search(r"/\s*(\d+)", total)
     stock_rows = int(m.group(1)) if m else len({_row_vals(r)["code"] for r in st["rows"] if _row_vals(r)["stock_location"]})
+    st["stock_rows"] = stock_rows
     progress, label, names = _expected_progress(st["rows"], stock_rows, st["qty"])
     shown = re.search(r"(\d+(?:\.\d+)?)\s*%", get("Progress"))
     bar = st.get("progress_bar")
     ok = bool(shown) and float(shown.group(1)) == label and (bar is None or _near(bar, progress, 0.01))
-    ck.add(group, "Progress = formula", ok, f"{progress:.2f} -> label {label}% ({PROGRESS_FORMULA}; {names})",
+    ck.add(group, "Progress = formula", ok,
+           f"formula: {PROGRESS_FORMULA} → {_show(PROGRESS_FORMULA, **names)} = {progress:.2f} → label {label}%",
            f"label {get('Progress')!r}, bar {bar}")
 
 
@@ -1548,7 +1655,7 @@ def _check_counts(ck, st, page):
             continue
         want = expected.get(field)
         ck.add(group, f"{field} count = rows meeting its rule", want is None or chips[label] == want,
-               f"{want} ({CHIP_RULES.get(field, '-')})", chips[label])
+               f"formula: {CHIP_RULES.get(field, '-')} = {want} row(s)", chips[label])
     for field in REQUIRED_FIELDS[group]:                  # each chip lists as many rows as it counts
         label = _find(field, list(chips))
         if label is None:
@@ -1561,11 +1668,11 @@ def _check_counts(ck, st, page):
             names = {"count": chips[label], "listed": len(listed),
                      "resolution": st["status"] in ("In Resolution", "Completed", "Auto Completed")}
             if len(listed) != chips[label] and known and _calc(known[1], **names):
-                ck.add(group, f"{field} lists {chips[label]} row(s)", False, chips[label],
+                ck.add(group, f"{field} lists {chips[label]} row(s)", False, f"formula: chip count = {chips[label]} row(s)",
                        f"{actual} (spec {known[0]}: count and list rules differ)", status="KNOWN",
                        finding=f"spec {known[0]}")
                 continue
-            ck.add(group, f"{field} lists {chips[label]} row(s)", len(listed) == chips[label], chips[label], actual)
+            ck.add(group, f"{field} lists {chips[label]} row(s)", len(listed) == chips[label], f"formula: chip count = {chips[label]} row(s)", actual)
         except Exception as e:
             ck.error(group, f"{field} chip list", e)
     _ui_chip(page, _find("All", list(chips)))
@@ -1580,14 +1687,16 @@ def _check_quantities(ck, st):
             ck.add(group, f"{field} card shown", False, "shown", f"MISSING (cards {list(st['qty'])})")
             continue
         want = sum(_calc(qty_rule, **v) for v in vals)
-        ck.add(group, f"{field} (Qty) = Σ {qty_rule}", _near(st["qty"][label], want), want, st["qty"][label])
+        ck.add(group, f"{field} (Qty) = Σ {qty_rule}", _near(st["qty"][label], want),
+               f"formula: Σ({qty_rule}) over {len(vals)} row(s) = {want:g}", st["qty"][label])
         priced = [v for v in vals if v["price"] is not None]
         if len(priced) < len(vals):
             ck.not_run(group, f"{field} (Value)", f"no price for {len(vals) - len(priced)} row(s) (export not read)")
             continue
         want = sum(_calc(value_rule, **v) for v in vals)
         got = st["value"].get(_find(field, list(st["value"])) or "")
-        ck.add(group, f"{field} (Value) = Σ {value_rule}", _near(got, want), round(want, 2), got)
+        ck.add(group, f"{field} (Value) = Σ {value_rule}", _near(got, want),
+               f"formula: Σ({value_rule}) over {len(vals)} row(s) = {want:.2f}", got)
 
 
 def _check_table(ck, st):
@@ -1598,39 +1707,28 @@ def _check_table(ck, st):
     not_audited_codes = (st.get("chip_lists") or {}).get(NOT_AUDITED_CHIP)
     audited_rows = [r for r in st["rows"] if not _not_audited(_row_vals(r), not_audited_codes)]
     for field, rule in ROW_FORMULAS.items():           # variance formulas: audited line items only
-        bad, checked = [], 0
-        got_samples, want_samples = [], []
+        bad, want_samples, got_samples = [], [], []
         for r in audited_rows:
             v = _row_vals(r, st["prices"])
             if "price" in rule and v["price"] is None:
                 continue
-            checked += 1
             want = _calc(rule, **v)
             got = {"Variance": v["variance"], "Variance Value": v["variance_value"],
                    "Variance Type": v["variance_type"]}.get(field)
+            want_samples.append(_row_sample(field, rule, v, want))
+            got_samples.append(f"{v['code']}: {_fmt_field(field, got)}")
             if not (got == want if isinstance(want, str) else _near(got, want)):
-                bad.append(f"{v['code']}: {got} vs {want}")
-            else:
-                if field == "Variance":
-                    want_samples.append(f"{v['code']}: {want:+g}")
-                    got_samples.append(f"{v['code']}: {got:+g}")
-                elif field == "Variance Value":
-                    want_samples.append(f"{v['code']}: {want:+.2f}")
-                    got_samples.append(f"{v['code']}: {got:+.2f}")
-                else:
-                    want_samples.append(f"{v['code']}: {want}")
-                    got_samples.append(f"{v['code']}: {got}")
-        if not checked:
+                bad.append(f"{v['code']}: {_fmt_field(field, got)} vs {_fmt_field(field, want)}")
+        if not want_samples:
             ck.not_run(group, f"{field} = {rule}", "no price (export not read)")
         else:
-            exp_text = ", ".join(want_samples[:6]) + (f" (+{len(want_samples)-6} more)" if len(want_samples) > 6 else "")
-            act_text = "; ".join(bad[:8]) if bad else (", ".join(got_samples[:6]) + (f" (+{len(got_samples)-6} more)" if len(got_samples) > 6 else ""))
-            ck.add(group, f"{field} = {rule}", not bad, exp_text, act_text)
+            ck.add(group, f"{field} = {rule}", not bad, f"formula: {rule} → {_sample(want_samples)}",
+                   _sample(bad, 8, "; ") if bad else _sample(got_samples))
     fmt = DATE_FORMATS["Audited Date"]
     bad = [f"{_row_vals(r)['code']}: {_cell(r, 'Audited Date')!r}" for r in st["rows"]
            if _blank(_cell(r, "Audited Date")) and not _parse_date(_cell(r, "Audited Date"), fmt)]
     date_samples = [f"{_row_vals(r)['code']}: {_cell(r, 'Audited Date')}" for r in audited_rows if _blank(_cell(r, "Audited Date"))]
-    act_dates = "; ".join(bad[:8]) if bad else (", ".join(date_samples[:6]) + (f" (+{len(date_samples)-6} more)" if len(date_samples) > 6 else ""))
+    act_dates = _sample(bad, 8, "; ") if bad else _sample(date_samples)
     ck.add(group, f"Audited Date format {fmt}", not bad, f"format {fmt} on every audited row", act_dates or "no dates")
     _check_not_audited(ck, st, audited_rows)
 
@@ -1644,23 +1742,24 @@ def _check_not_audited(ck, st, audited_rows):
               else f"rows meeting {CHIP_RULES[NOT_AUDITED_CHIP]}")
     not_audited = [r for r in st["rows"] if r not in audited_rows]
     codes = [_row_vals(r)["code"] for r in not_audited]
-    ck.add(group, "Line items that were not audited", True, source, f"{len(codes)} item(s): {codes[:20]}",
-           status="PASS" if codes else "NOT RUN")
+    ck.add(group, "Line items that were not audited", True, f"formula: {source} = {len(codes)} item(s)",
+           f"{len(codes)} item(s): {codes[:20]}", status="PASS" if codes else "NOT RUN")
+    audited_codes = [_row_vals(r)["code"] for r in audited_rows]
     for field, (rule, finding) in NOT_AUDITED_EXPECT.items():
         if not not_audited:
             break
         bad = [f"{_row_vals(r)['code']}: {_cell(r, field)!r}" for r in not_audited if not _calc(rule, **_row_vals(r))]
         samples = [f"{_row_vals(r)['code']}: {_cell(r, field)!r}" for r in not_audited]
-        exp_text = f"{field} meets {rule} on all {len(not_audited)} uncounted item(s)"
-        act_text = "; ".join(bad[:10]) if bad else (", ".join(samples[:8]) + (f" (+{len(samples)-8} more)" if len(samples) > 8 else ""))
-        ck.add(group, f"Not audited: {field} ({rule})", not bad, exp_text, act_text,
+        ck.add(group, f"Not audited: {field} ({rule})", not bad,
+               f"formula: {rule} on all {len(not_audited)} uncounted item(s) → {_sample(codes, 8)}",
+               _sample(bad, 10, "; ") if bad else _sample(samples, 8),
                finding=f"spec {finding}" if bad and finding else "")
     for field, rule in AUDITED_EXPECT.items():
         bad = [f"{_row_vals(r)['code']}: {_cell(r, field)!r}" for r in audited_rows if not _calc(rule, **_row_vals(r))]
         samples = [f"{_row_vals(r)['code']}: {_cell(r, field)!r}" for r in audited_rows]
-        exp_text = f"{field} shown ({rule}) on all {len(audited_rows)} audited row(s)"
-        act_text = "; ".join(bad[:10]) if bad else (", ".join(samples[:6]) + (f" (+{len(samples)-6} more)" if len(samples) > 6 else ""))
-        ck.add(group, f"Audited: {field} shown ({rule})", not bad, exp_text, act_text)
+        ck.add(group, f"Audited: {field} shown ({rule})", not bad,
+               f"formula: {rule} on all {len(audited_rows)} audited row(s) → {_sample(audited_codes, 8)}",
+               _sample(bad, 10, "; ") if bad else _sample(samples))
 
 
 def _check_location_view(ck, st, page, rows):
@@ -1678,33 +1777,36 @@ def _check_location_view(ck, st, page, rows):
 
     # --- 1. Columns & Values on every row (doc 04 §3, §8 finding 1, §8 finding 8, §9) ---
     bad_val, bad_type = [], []
+    want_vals, want_types = [], []
     for v in loc_vals:
         is_audited = (v["audited"] > 0) or bool(v["auditor"])
         want_val = ((v["audited"] - v["stock"]) * v["price"]) if (is_audited and v["price"] is not None) else 0.0
         want_type = ("Positive" if v["audited"] > v["stock"] else "Negative" if v["audited"] < v["stock"] else "-") if is_audited else "-"
+        if not is_audited:
+            want_vals.append(f"{v['code']}: 0.00 (never counted)")
+            want_types.append(f"{v['code']}: '-' (never counted)")
+        else:
+            want_types.append(_row_sample("Variance Type", ROW_FORMULAS["Variance Type"], v, want_type))
+            if v["price"] is not None:
+                want_vals.append(_row_sample("Variance Value", ROW_FORMULAS["Variance Value"], v, want_val))
         if v["price"] is not None and not _near(v["variance_value"], want_val):
-            bad_val.append(f"{v['code']}: got {v['variance_value']} vs {want_val}")
+            bad_val.append(f"{v['code']}: got {v['variance_value']:+.2f} vs {want_val:+.2f}")
         if v["variance_type"] != want_type and not (not is_audited and v["variance_type"] in ("-", "Not Audited")):
             bad_type.append(f"{v['code']}: got {v['variance_type']!r} vs {want_type!r}")
-    val_samples = [
-        f"{v['code']}: ({v['audited']:g} - {v['stock']:g}) * {v['price']:.2f} = {v['variance_value']:+.2f}"
-        if (v["price"] is not None and ((v["audited"] > 0) or bool(v["auditor"])))
-        else f"{v['code']}: 0.00 (uncounted)" if not ((v["audited"] > 0) or bool(v["auditor"]))
-        else f"{v['code']}: {v['variance_value']:+.2f}"
-        for v in loc_vals
-    ]
     ck.add(group, "Location: Variance Value = (audited - stock) * price / 0", not bad_val,
-           "formula (audited - stock) * price on counted rows; 0.00 on never-counted rows (§8 F1)",
-           "; ".join(bad_val[:6]) if bad_val else (", ".join(val_samples[:6]) + (f" (+{len(val_samples)-6} more)" if len(val_samples) > 6 else "")))
+           f"formula: {ROW_FORMULAS['Variance Value']} on counted rows, 0.00 on never-counted rows (§8 F1) → "
+           f"{_sample(want_vals)}",
+           _sample(bad_val, 6, "; ") if bad_val else _sample(f"{v['code']}: {v['variance_value']:+.2f}" for v in loc_vals))
 
-    type_samples = [f"{v['code']}: {v['variance_type']}" for v in loc_vals]
     ck.add(group, "Location: Variance Type = Positive/Negative/- (audited) / '-' (never counted)", not bad_type,
-           "Positive (audited > stock), Negative (audited < stock), '-' (equal or never-counted §8 F1)",
-           "; ".join(bad_type[:6]) if bad_type else (", ".join(type_samples[:8]) + (f" (+{len(type_samples)-8} more)" if len(type_samples) > 8 else "")))
+           f"formula: audited > stock → Positive, audited < stock → Negative, else '-' (equal or never counted §8 F1) → "
+           f"{_sample(want_types, 8)}",
+           _sample(bad_type, 6, "; ") if bad_type else _sample((f"{v['code']}: {v['variance_type']}" for v in loc_vals), 8))
 
     # --- 2. Stock Location vs Audited Location (doc 04 §2.5, §3, §8 finding 6, §9) ---
     bad_loc = []
     case_breakdown = []
+    case_n = Counter()
     for v in loc_vals:
         code = v["code"]
         stk_loc = v["stock_location"].strip()
@@ -1714,6 +1816,8 @@ def _check_location_view(ck, st, page, rows):
         has_auditor = bool(v["auditor"])
         is_counted = (aud > 0) or has_auditor
         has_sheet = (stk > 0)
+        case_n["uncounted" if not is_counted and has_sheet else "excess" if is_counted and not has_sheet
+               else "counted" if is_counted else "other"] += 1
 
         # §8 Finding 6: Blank vs "Unassigned" semantics
         # Stock Location blank = no sheet side (excess/off-sheet); "Unassigned" = sheet row without a location.
@@ -1752,8 +1856,10 @@ def _check_location_view(ck, st, page, rows):
                 case_breakdown.append(f"Case 3 Split Location {code}: StockLoc='{stk_loc}', AudLoc='{aud_loc}'")
 
     ck.add(group, "Location: Stock Location blank for excess, Audited Location blank for uncounted (§8 F6)", not bad_loc,
-           "Excess: StockLoc='', Uncounted: AudLoc='', Counted: AudLoc non-empty, Sheet: StockLoc non-empty",
-           "; ".join(bad_loc[:6]) if bad_loc else ("; ".join(case_breakdown[:8]) + (f" (+{len(case_breakdown)-8} more)" if len(case_breakdown) > 8 else "")))
+           f"formula: Excess (counted, stock == 0) → StockLoc='' on {case_n['excess']} row(s); "
+           f"Uncounted (stock > 0, not counted) → AudLoc='' on {case_n['uncounted']} row(s); "
+           f"Counted sheet rows → StockLoc and AudLoc non-empty on {case_n['counted']} row(s)",
+           _sample(bad_loc, 6, "; ") if bad_loc else _sample(case_breakdown, 8, "; "))
 
     # --- Batch in Location mode: ONLY check when inventory type is 'batch' (skip for 'unit' and 'serialized') ---
     offered_options = st.get("options") or []
@@ -1764,10 +1870,12 @@ def _check_location_view(ck, st, page, rows):
         if batch_col:
             batch_keys = [tuple(_txt(_cell(r, k)) for k in ["Item Code", "Stock Location", "Audited Location"]) for r in rows]
             dup_locs = sorted({k for k in batch_keys if batch_keys.count(k) > 1})
-            ck.add(group, "Batch in Location mode: one row per location", not dup_locs, "unique per location",
-                   f"repeated={dup_locs[:5]}" if dup_locs else "one row per location")
+            ck.add(group, "Batch in Location mode: one row per location", not dup_locs,
+                   f"formula: count per (ItemCode, StockLocation, AuditedLocation) == 1 over {len(rows)} row(s)",
+                   f"repeated={dup_locs[:5]}" if dup_locs else f"{len(set(batch_keys))} unique key(s) in {len(rows)} row(s)")
             multi_batch = [f"{_cell(r, 'Item Code')}: {_cell(r, batch_col)}" for r in rows if "," in _cell(r, batch_col)]
-            ck.add(group, "Batch in Location mode: one batch shown per row", not multi_batch, "one batch per row",
+            ck.add(group, "Batch in Location mode: one batch shown per row", not multi_batch,
+                   f"formula: batches per row == 1 → 0 multi-batch row(s) of {len(rows)}",
                    f"multi-batch rows: {multi_batch[:5]}" if multi_batch else "one batch shown per row")
 
     # --- 3. Summary Tiles (Metric strip) with Qty (doc 04 §5) ---
@@ -1787,17 +1895,17 @@ def _check_location_view(ck, st, page, rows):
     if label_stock:
         ck.add(group, "Location: Stock card = Σ distinct (ItemCode, StockLocation) stock",
                _near(loc_qty[label_stock], exp_stock),
-               f"Stock Qty = {exp_stock:g} (Σ distinct ItemCode x StockLocation)",
+               f"formula: Σ distinct (ItemCode, StockLocation) StockQty over {len(seen_stock)} key(s) = {exp_stock:g}",
                f"{loc_qty[label_stock]:g}")
     if label_audited:
         ck.add(group, "Location: Audited card = Σ audited",
                _near(loc_qty[label_audited], exp_audited),
-               f"Audited Qty = {exp_audited:g}",
+               f"formula: Σ AuditedQty over {len(loc_vals)} row(s) = {exp_audited:g}",
                f"{loc_qty[label_audited]:g}")
     if label_damaged:
         ck.add(group, "Location: Damaged card = Σ damaged",
                _near(loc_qty[label_damaged], exp_damaged),
-               f"Damaged Qty = {exp_damaged:g}",
+               f"formula: Σ DamagedQty over {len(loc_vals)} row(s) = {exp_damaged:g}",
                f"{loc_qty[label_damaged]:g}")
 
     # --- 4. Filter Chips (Badges) in Location Mode (doc 04 §4) ---
@@ -1821,7 +1929,7 @@ def _check_location_view(ck, st, page, rows):
             continue
         got_cnt = loc_chips[chip_lbl]
         ck.add(group, f"Location: {field} chip count = rows meeting its rule", got_cnt == want_cnt,
-               f"{want_cnt} row(s) ({loc_chip_rules[field]})", f"{got_cnt} row(s)")
+               f"formula: {loc_chip_rules[field]} = {want_cnt} row(s)", f"{got_cnt} row(s)")
 
     # --- 5. Table Filter: Badge Clicking in Location Mode (doc 04 §4) ---
     for field, want_cnt in exp_chips.items():
@@ -1836,7 +1944,7 @@ def _check_location_view(ck, st, page, rows):
             bad_filt = [v["code"] for v in filt_vals if not _calc(loc_chip_rules[field], **v)]
             ck.add(group, f"Location: Filter chip '{field}' lists {want_cnt} row(s) meeting its rule",
                    len(filt_rows) == want_cnt and not bad_filt,
-                   f"{want_cnt} row(s) meeting {loc_chip_rules[field]}",
+                   f"formula: {loc_chip_rules[field]} = {want_cnt} row(s), every listed row meets it",
                    f"{len(filt_rows)} row(s); non-matching={bad_filt}{note}")
         except Exception as e:
             ck.error(group, f"Location: Filter chip '{field}' table filter", e)
@@ -1862,7 +1970,7 @@ def _check_location_view(ck, st, page, rows):
             s_codes = [_txt(_cell(r, "Item Code")) for r in s_rows]
             ck.add(group, f"Location: Table Search '{test_code}' filters table rows",
                    len(s_rows) == exp_matches,
-                   f"{exp_matches} row(s) matching '{test_code}': {matching_codes[:5]}",
+                   f"formula: ItemCode contains '{test_code}' = {exp_matches} row(s): {matching_codes[:5]}",
                    f"{len(s_rows)} row(s): {s_codes[:5]}")
             clear_btn = page.locator(f"{UI_SUMMARY} i.pi-times, {UI_SUMMARY} .clear-btn, {UI_SUMMARY} span.search-close").first
             if clear_btn.count() and clear_btn.is_visible():
@@ -1895,6 +2003,7 @@ def _check_options(ck, st, page):
             if label is None or spec is None:
                 continue
             rows, note = _ui_rows_retry(page, st, lambda: _ui_summarize(page, label), st["chips"].get("All", 0) > 0)
+            st.setdefault("mode_rows", {})[option] = rows       # Auditor rows: Auditor Insights expectations
             heads = _ui_headers(page)
             want = [h for h in base_heads if _find(h, spec["drop"]) is None] + spec["add"]
             lost = [h for h in want if _find(h, heads) is None]
@@ -1905,7 +2014,8 @@ def _check_options(ck, st, page):
             keys = [tuple(_txt(_cell(r, k)) for k in spec["key"]) for r in rows]
             dup = sorted({k for k in keys if keys.count(k) > 1})
             ck.add(group, f"{option}: one row per {' × '.join(spec['key'])}", not dup and bool(rows),
-                   "unique rows", f"{len(rows)} row(s); repeated={dup[:5]}{note}")
+                   f"formula: count per ({', '.join(spec['key'])}) == 1 over {len(rows)} row(s)",
+                   f"{len(rows)} row(s); repeated={dup[:5]}{note}")
             per = defaultdict(lambda: {"stock": [], "audited": 0.0, "damaged": 0.0})
             unit_rows = rows
             if option == "UOM":                              # compare only rows counted in the primary unit
@@ -1927,24 +2037,27 @@ def _check_options(ck, st, page):
                 if not (stock_ok and _near(p["audited"], iv["audited"]) and _near(p["damaged"], iv["damaged"])):
                     bad.append(f"{code}: stock {p['stock']} audited {p['audited']:g} damaged {p['damaged']:g} "
                                f"vs Item view {iv['stock']:g}/{iv['audited']:g}/{iv['damaged']:g}")
-            sample_per = [f"{code}: stk={iv['stock']:g}, aud={p['audited']:g}, dam={p['damaged']:g}"
-                          for code, p in list(per.items())[:6] if (iv := item_view.get(code))]
+            stock_rule = "Σ stock" if spec["stock"] == "sum" else "stock of every row"
+            want_per = [f"{code}: stk={iv['stock']:g}, aud={iv['audited']:g}, dam={iv['damaged']:g}"
+                        for code in per if (iv := item_view.get(code))]
+            got_per = [f"{code}: stk={'+'.join(f'{s:g}' for s in p['stock'])}, aud={p['audited']:g}, dam={p['damaged']:g}"
+                       for code, p in per.items()]
             ck.add(group, f"{option}: rows add up to the Item view per item", not bad,
-                   f"stock {spec['stock']}, audited and damaged summed",
-                   "; ".join(bad[:6]) if bad else (", ".join(sample_per) + f" ({len(per)} item(s) match)"))
-            bad = []
-            var_samples = []
+                   f"formula: per item {stock_rule}, Σ audited, Σ damaged = Item view → {_sample(want_per)}",
+                   _sample(bad, 6, "; ") if bad else f"{_sample(got_per)} ({len(per)} item(s) match)")
+            bad, want_var, got_var = [], [], []
             for r in unit_rows:                          # not audited line items: variance 0 (NOT_AUDITED_EXPECT)
                 v = _row_vals(r, st["prices"])
                 not_audited = _not_audited(v, (st.get("chip_lists") or {}).get(NOT_AUDITED_CHIP))
                 want = 0 if not_audited else _calc(ROW_FORMULAS["Variance"], **v)
+                want_var.append(f"{v['code']}: 0 (uncounted)" if not_audited
+                                else _row_sample("Variance", ROW_FORMULAS["Variance"], v, want))
+                got_var.append(f"{v['code']}: {v['variance']:+g}")
                 if not _near(v["variance"], want):
-                    bad.append(f"{v['code']}: {v['variance']:g} vs {want:g}")
-                else:
-                    var_samples.append(f"{v['code']}: {v['variance']:+g}")
+                    bad.append(f"{v['code']}: {v['variance']:+g} vs {want:+g}")
             ck.add(group, f"{option}: Variance = {ROW_FORMULAS['Variance']} (audited) / 0 (not audited)", not bad,
-                   f"formula {ROW_FORMULAS['Variance']} (audited) / 0 (uncounted)",
-                   "; ".join(bad[:6]) if bad else (", ".join(var_samples[:8]) + (f" (+{len(var_samples)-8} more)" if len(var_samples) > 8 else "")))
+                   f"formula: {ROW_FORMULAS['Variance']} (audited) / 0 (uncounted) → {_sample(want_var, 8)}",
+                   _sample(bad, 6, "; ") if bad else _sample(got_var, 8))
             if option == "Location":
                 _check_location_view(ck, st, page, rows)
     except Exception as e:
@@ -1968,12 +2081,16 @@ def _check_actions(ck, st, page):
         label = _find(field, list(pool))
         want = bool(_calc(rule["show"], **facts))
         ck.add(group, f"{field} {'shown' if want else 'hidden'} ({rule['where']}, status {st['status']})",
-               (label is not None) == want, "shown" if want else "hidden", "shown" if label else "hidden")
+               (label is not None) == want,
+               f"formula: {rule['show']} → {_show(rule['show'], **facts)} = {want} → {'shown' if want else 'hidden'}",
+               "shown" if label else "hidden")
         if label and rule.get("disabled"):
             want_off = bool(_calc(rule["disabled"], **facts))
             off = pool[label].is_disabled()
             ck.add(group, f"{field} {'disabled' if want_off else 'enabled'} (status {st['status']})", off == want_off,
-                   "disabled" if want_off else "enabled", "disabled" if off else "enabled")
+                   f"formula: {rule['disabled']} → {_show(rule['disabled'], **facts)} = {want_off} → "
+                   f"{'disabled' if want_off else 'enabled'}",
+                   "disabled" if off else "enabled")
         if not label:
             continue
         try:
@@ -2008,7 +2125,7 @@ def _check_clipboard(ck, st, page, button):
     head = lines[0].split("\t") if lines else []
     lost = [h for h in REQUIRED_FIELDS["Audit Report - Table Fields"] if h != "S.No" and _find(h, head) is None]
     ck.add(group, "Copy Table copies the header and every row shown", bool(lines) and not lost and len(found) == len(codes),
-           f"header with the table fields + {len(codes)} row(s)",
+           f"formula: 1 header line (table fields) + {len(codes)} row(s) shown = {len(codes) + 1} line(s)",
            f"{len(lines)} line(s); rows found {len(found)}/{len(codes)}; header missing={lost}")
 
 
@@ -2040,11 +2157,15 @@ def _check_auditor_insights(ck, st, page, button):
     8. Dialog close: clicking close-btn cleanly hides dialog.
     """
     group = "Auditor Insights"
+    replies = []                                         # GetAuditorSummary replies: progress inputs per auditor
+    on_reply = lambda r: replies.append(r) if AUDITOR_API.lower() in r.url.lower() else None
+    page.on("response", on_reply)
     button.click()
     dlg = page.locator("div.auditor-summary-dialog").first
     try:
         dlg.wait_for(state="visible", timeout=25000)
     except Exception as e:
+        page.remove_listener("response", on_reply)
         ck.add(group, "Auditor Insights dialog opens", False, "dialog visible", f"timed out: {e}")
         return
 
@@ -2058,6 +2179,15 @@ def _check_auditor_insights(ck, st, page, button):
                 break
         page.wait_for_timeout(500)
     _ui_settle(page, 1500)
+    page.remove_listener("response", on_reply)
+    api_rows = []
+    for reply in reversed(replies):                      # the latest reply that reads
+        try:
+            api_rows = _api_records(reply.json())
+        except Exception:
+            continue
+        if api_rows:
+            break
 
     # 1. Dialog title
     title_el = dlg.locator(".auditor-summary-title .title, .p-dialog-title").first
@@ -2085,7 +2215,7 @@ def _check_auditor_insights(ck, st, page, button):
 
     # 4. Table rows in tbody
     row_els = dlg.locator("tbody.p-datatable-tbody > tr").all()
-    ck.add(group, "Auditor rows rendered", len(row_els) > 0, ">= 1 auditor row", f"{len(row_els)} row(s)")
+    ck.add(group, "Auditor rows rendered", len(row_els) > 0, "formula: auditor rows >= 1", f"{len(row_els)} row(s)")
 
     parsed_rows = []
     bad_quantities = []
@@ -2243,6 +2373,99 @@ def _check_auditor_insights(ck, st, page, button):
            "Action disabled when audit In Resolution / Completed; enabled when In Progress",
            "; ".join(bad_action_disabled[:5]) or f"all {len(parsed_rows)} row(s) conform")
 
+    # 4b. Per auditor: each figure against its formula (AUDITOR_FORMULAS) over that auditor's report rows.
+    # The Auditor view has one row per (Item Code, Auditor); without it the Item view rows are used.
+    aud_rows = (st.get("mode_rows") or {}).get("Auditor") or st["rows"]
+    exp_aud = _expected_auditors(aud_rows, st["prices"], [r["name"] for r in parsed_rows])
+    qty_cards = st.get("qty") or {}
+    stock_total = qty_cards.get(_find("Stock Quantity", list(qty_cards)) or "")
+    one_auditor = len(parsed_rows) == 1 and st.get("stock_rows") and stock_total
+    tiles = st.get("tiles") or {}
+    random_map = _key(tiles.get(_find("Mapping Type", list(tiles)) or "", "")) == "random"
+    uncounted = [v for v in map(_row_vals, st["rows"]) if _calc(RANDOM_UNCOUNTED, **v)]
+    for i, r in enumerate(parsed_rows):
+        aud_label = r["name"]
+        e = exp_aud[aud_label]
+        want = e["Completed Inventory"]
+        parts = _sample([f"{v['audited']:g}" for v in e["vals"] if v["audited"]], 8, " + ") or "0"
+        ck.add(group, f"Auditor '{aud_label}' | Completed Inventory", _near(r["completed"], want),
+               f"formula: Σ AuditedQty (excl damaged) over {e['counted_rows']} counted row(s) = {parts} = {want:g}",
+               f"{r['completed']:g}")
+
+        want_a, want_d = e["Audited Value"], e["Damaged Value"]
+        if want_a is None or want_d is None:
+            val_ok = r["audited_val"] >= 0 and r["damaged_val"] >= 0
+            exp_val = ("formula: Audited = Σ(audited * price), Damaged = Σ(damaged * price); "
+                       "no price (export not read) → Audited >= 0, Damaged >= 0")
+        else:
+            val_ok = _near(r["audited_val"], want_a) and _near(r["damaged_val"], want_d)
+            a_parts = _sample([f"{v['audited']:g} * {v['price']:.2f}" for v in e["vals"] if v["audited"]], 6, " + ") or "0"
+            d_parts = _sample([f"{v['damaged']:g} * {v['price']:.2f}" for v in e["vals"] if v["damaged"]], 6, " + ") or "0"
+            exp_val = (f"formula: Audited = Σ(audited * price) = {a_parts} = {want_a:.2f}; "
+                       f"Damaged = Σ(damaged * price) = {d_parts} = {want_d:.2f}")
+        ck.add(group, f"Auditor '{aud_label}' | Audited & Damaged Value", val_ok, exp_val,
+               f"Audited: {r['audited_val']:.2f}, Damaged: {r['damaged_val']:.2f}",
+               finding="spec 01 F4/F5 (cost source / duplicate stock rows) may apply"
+               if not val_ok and want_a is not None else "")
+
+        m_prog = re.search(r"(\d+(\.\d+)?)\s*%", r["progress"])
+        shown_prog = float(m_prog.group(1)) if m_prog else None
+        a = _api_auditor(api_rows, aud_label)
+        act_prog, finding = f"{r['progress']}", ""
+        if a is not None:                                # this auditor's assigned rows and stock (AUDITOR_API)
+            remaining = _qn(a.get("remainingcount"))
+            names = {"counted_rows": _qn(a.get("auditedcount")), "completed": r["completed"],
+                     "assigned_rows": e["on_sheet_counted"] + remaining,
+                     "assigned_stock": _qn(a.get("assignedinventorycount"))}
+            want_p, api_p = _calc(AUDITOR_PROGRESS_FORMULA, **names), _qn(a.get("progress"))
+            prog_ok = shown_prog is not None and abs(shown_prog - want_p) <= 0.5 + 1e-6 and _near(api_p, want_p, 0.01)
+            exp_prog = (f"formula: {AUDITOR_PROGRESS_FORMULA} → {_show(AUDITOR_PROGRESS_FORMULA, **names)}"
+                        f" = {want_p:.2f} → {round_half_up(want_p)} % (counted_rows = AuditedCount "
+                        f"{names['counted_rows']:g}; assigned_rows = {e['on_sheet_counted']} on-sheet row(s) counted + "
+                        f"RemainingCount {remaining:g}; assigned_stock = AssignedInventoryCount {names['assigned_stock']:g})")
+            act_prog = f"{r['progress']} (API progress {api_p:.2f})"
+        elif one_auditor:                                # the only auditor is assigned every stock-sheet row
+            names = {"counted_rows": e["counted_rows"], "completed": want,
+                     "assigned_rows": st["stock_rows"], "assigned_stock": stock_total}
+            want_p = _calc(AUDITOR_PROGRESS_FORMULA, **names)
+            prog_ok = shown_prog is not None and abs(shown_prog - round_half_up(want_p)) <= 1
+            exp_prog = (f"formula: {AUDITOR_PROGRESS_FORMULA} → {_show(AUDITOR_PROGRESS_FORMULA, **names)}"
+                        f" = {want_p:.2f} → {round_half_up(want_p)} %")
+            finding = "counted_rows here = report rows per item; the server counts each count line (spec 01 §4)"
+        else:
+            names = {"counted_rows": e["counted_rows"], "completed": want}
+            prog_ok = shown_prog is not None and 0.0 <= shown_prog <= 100.0
+            exp_prog = (f"formula: {_show(AUDITOR_PROGRESS_FORMULA, **names)}; {AUDITOR_API} reply not read, so "
+                        f"assigned_rows / assigned_stock unknown ({len(parsed_rows)} auditors) → 0 % - 100 %")
+        ck.add(group, f"Auditor '{aud_label}' | Progress %", prog_ok, exp_prog, act_prog,
+               finding=finding if not prog_ok else "")
+
+        if a is not None and random_map:                 # Random: the uncounted stock rows split evenly
+            slice_names = {"uncounted": len(uncounted), "auditors": len(parsed_rows), "last": i == len(parsed_rows) - 1}
+            want_rem = _calc(RANDOM_SLICE, **slice_names)
+            ck.add(group, f"Auditor '{aud_label}' | Assigned rows (Random)", _near(remaining, want_rem),
+                   f"formula: on-sheet rows counted + {RANDOM_SLICE} → {e['on_sheet_counted']} + "
+                   f"{_show(RANDOM_SLICE, **slice_names)} = {e['on_sheet_counted']} + {want_rem:g} = "
+                   f"{e['on_sheet_counted'] + want_rem:g}",
+                   f"{e['on_sheet_counted']} + RemainingCount {remaining:g} = {e['on_sheet_counted'] + remaining:g}")
+
+        timing_ok = bool(re.match(r"^\d{2,}:\d{2}$", r["timing"]))
+        status_ok = bool(_calc(AUDITOR_STATUS_RULE, counted_rows=e["counted_rows"], status=r["status"]))
+        want_st = "In Progress / Completed" if e["counted_rows"] > 0 else "Yet to Start / Completed / Unknown"
+        ck.add(group, f"Auditor '{aud_label}' | Status & Elapsed Timing", timing_ok and status_ok,
+               f"formula: counted_rows = {e['counted_rows']} → Status {want_st}; Timing HH:mm",
+               f"Status: {r['status']}, Timing: {r['timing']}, Action: {r['action']}")
+
+    if api_rows and random_map and parsed_rows:          # Random: every stock row's stock assigned once
+        got = sum(_qn((_api_auditor(api_rows, r["name"]) or {}).get("assignedinventorycount")) for r in parsed_rows)
+        counted_stock = [exp_aud[r["name"]]["on_sheet_stock"] for r in parsed_rows]
+        uncounted_stock = sum(v["stock"] for v in uncounted)
+        want = sum(counted_stock) + uncounted_stock
+        ck.add(group, "Σ assigned stock of all auditors (Random)", _near(got, want),
+               f"formula: Σ stock of the on-sheet rows each auditor counted + Σ stock of the {len(uncounted)} uncounted "
+               f"row(s) = {' + '.join(f'{s:g}' for s in counted_stock)} + {uncounted_stock:g} = {want:g}",
+               f"Σ AssignedInventoryCount = {got:g}")
+
     # 5. Assigned auditors check (spec §4 & Finding F13)
     assigned_tile = st.get("tiles", {}).get(_find("Auditor(s)", list(st.get("tiles", {}))) or "")
     if assigned_tile:
@@ -2251,7 +2474,7 @@ def _check_auditor_insights(ck, st, page, button):
         matched = [a for a in assigned_names if any(a in d or d in a for d in aud_names_in_dlg)]
         ck.add(group, "Assigned auditors from header are present in dialog",
                len(matched) == len(assigned_names),
-               f"all {len(assigned_names)} assigned auditor(s)",
+               f"formula: auditors in the Auditor(s) tile = {len(assigned_names)} auditor(s) in the dialog",
                f"{len(matched)}/{len(assigned_names)} present: {matched}")
 
     # 6. Total row (tfoot)
@@ -2270,17 +2493,26 @@ def _check_auditor_insights(ck, st, page, button):
 
             ck.add(group, "Total row label is 'Total'", "total" in tfoot_label.lower(), "Total", tfoot_label)
 
+            n_aud = len(parsed_rows)
+            terms = lambda f, fmt: _sample([format(r[f], fmt) for r in parsed_rows], 8, " + ") or "0"
+
             sum_completed = sum(r["completed"] for r in parsed_rows)
             ck.add(group, "Total Completed Inventory = Σ auditor completed inventory",
-                   _near(total_completed, sum_completed), sum_completed, total_completed)
+                   _near(total_completed, sum_completed),
+                   f"formula: Σ Completed Inventory of {n_aud} auditor(s) = {terms('completed', 'g')} = {sum_completed:g}",
+                   f"{total_completed:g}")
 
             sum_aud_val = sum(r["audited_val"] for r in parsed_rows)
             ck.add(group, "Total Audited Value = Σ auditor audited values",
-                   _near(total_aud_val, sum_aud_val, 0.05), round(sum_aud_val, 2), total_aud_val)
+                   _near(total_aud_val, sum_aud_val, 0.05),
+                   f"formula: Σ Audited Value of {n_aud} auditor(s) = {terms('audited_val', '.2f')} = {sum_aud_val:.2f}",
+                   f"{total_aud_val:.2f}")
 
             sum_dam_val = sum(r["damaged_val"] for r in parsed_rows)
             ck.add(group, "Total Damaged Value = Σ auditor damaged values",
-                   _near(total_dam_val, sum_dam_val, 0.05), round(sum_dam_val, 2), total_dam_val)
+                   _near(total_dam_val, sum_dam_val, 0.05),
+                   f"formula: Σ Damaged Value of {n_aud} auditor(s) = {terms('damaged_val', '.2f')} = {sum_dam_val:.2f}",
+                   f"{total_dam_val:.2f}")
 
             placeholders = [tfoot_timing, tfoot_prog, tfoot_status, tfoot_action]
             all_dashes = all(p in ("--", "-", "") for p in placeholders)
@@ -2298,7 +2530,8 @@ def _check_auditor_insights(ck, st, page, button):
             filtered_tr = dlg.locator("tbody.p-datatable-tbody > tr").all()
             exp_cnt = sum(1 for r in parsed_rows if test_auditor.lower() in r["name"].lower())
             ck.add(group, f"Search box filters rows by auditor name ('{test_auditor}')",
-                   len(filtered_tr) == exp_cnt, f"{exp_cnt} row(s)", f"{len(filtered_tr)} row(s)")
+                   len(filtered_tr) == exp_cnt, f"formula: auditor name contains '{test_auditor}' = {exp_cnt} row(s)",
+                   f"{len(filtered_tr)} row(s)")
 
             # Check Spec 01 Finding F9: Total row ignores search filter
             if tfoot_tr.count() > 0:
@@ -2309,13 +2542,14 @@ def _check_auditor_insights(ck, st, page, button):
                     sum_filt = sum(r["completed"] for r in parsed_rows if test_auditor.lower() in r["name"].lower())
                     if sum_all != sum_filt and _near(current_tfoot_comp, sum_all):
                         ck.add(group, "Total row ignores search filter (Spec 01 F9)",
-                               False, f"filtered sum {sum_filt}",
-                               f"shows grand total {current_tfoot_comp} (spec 01 F9: Total ignores search filter)",
+                               False, f"formula: Σ Completed Inventory of filtered rows = {sum_filt:g}",
+                               f"shows grand total {current_tfoot_comp:g} (spec 01 F9: Total ignores search filter)",
                                status="KNOWN", finding="spec 01 F9")
                     else:
                         ck.add(group, "Total row reflects search filtered rows",
                                _near(current_tfoot_comp, sum_filt) or _near(current_tfoot_comp, sum_all),
-                               f"filtered total {sum_filt}", f"{current_tfoot_comp}")
+                               f"formula: Σ Completed Inventory of filtered rows = {sum_filt:g} "
+                               f"(or all rows = {sum_all:g})", f"{current_tfoot_comp:g}")
 
             # Clear search
             search_input.fill("")
@@ -2324,7 +2558,7 @@ def _check_auditor_insights(ck, st, page, button):
             restored_tr = dlg.locator("tbody.p-datatable-tbody > tr").all()
             ck.add(group, "Clearing search restores all auditor rows",
                    len(restored_tr) == len(parsed_rows),
-                   f"{len(parsed_rows)} row(s)", f"{len(restored_tr)} row(s)")
+                   f"formula: all auditor rows = {len(parsed_rows)} row(s)", f"{len(restored_tr)} row(s)")
         except Exception as e:
             ck.error(group, "Auditor Insights search filter test", e)
 
@@ -2512,6 +2746,7 @@ def _check_pdf_content(ck, st, pages, where):
     t = _g(flat, r"AUDIT DATE\s*\d{1,2}/\d{1,2}/\d{4}\s*(\d{1,2}:\d{2}\s*[ap]m)")
     ui_when = _parse_date(tile("Date & Time"), DATE_FORMATS["Date & Time"])
     try:
+        t = re.sub(r"\s*([ap]m)$", r" \1", t, flags=re.I) if t else t      # "9:45am" and "9:45 am" both read
         pdf_when = datetime.strptime(f"{d} {t.upper()}", "%d/%m/%Y %I:%M %p") if d and t else None
     except ValueError:
         pdf_when = None
@@ -2532,25 +2767,33 @@ def _check_pdf_content(ck, st, pages, where):
     m = re.search(r"ITEMS INVOLVED\s*(\d+)\s*(\d+) stock lines?\s*\W{0,3}\s*(\d+) locations?", flat, re.I)
     got = tuple(int(x) for x in m.groups()) if m else None
     add("Items involved / stock lines / locations", got == (exp["items"], exp["stock_lines"], exp["locations"]),
-        (exp["items"], exp["stock_lines"], exp["locations"]), got)
+        f"formula: distinct ItemCode = {exp['items']}; distinct ItemCode with {PDF_COUNTS['stock_lines']} = "
+        f"{exp['stock_lines']}; distinct StockLocation of those = {exp['locations']}", got)
     m = re.search(r"VERIFIED \(COUNTED\)\s*([\d.]+)\s*units\s*(\d+) lines counted", flat, re.I)
+    counted_rule = PDF_COUNTS["counted_lines"]
     add("Verified (counted) units and lines", bool(m) and _close(m.group(1), exp["verified_units"], PDF_QTY_TOL)
-        and int(m.group(2)) == exp["lines_counted"], f"{exp['verified_units']:g} units, {exp['lines_counted']} lines",
+        and int(m.group(2)) == exp["lines_counted"],
+        f"formula: Σ audited where {counted_rule} = {exp['verified_units']:g} units; "
+        f"count({counted_rule}) = {exp['lines_counted']} lines",
         f"{m.group(1)} units, {m.group(2)} lines" if m else None)
     cards = st.get("qty") or {}
     if "Audited" in cards:
         add("Verified units = Audited Quantity card", bool(m) and _close(m.group(1), cards["Audited"], TOLERANCE),
-            cards["Audited"], m.group(1) if m else None)
+            f"formula: Verified units = Audited Quantity card = {cards['Audited']:g}", m.group(1) if m else None)
     m = re.search(r"ADJUSTED QTY\s*\+([\d.]+)\s*-([\d.]+)\s*Net\s*([-+]?[\d.]+)\s*units", flat, re.I)
     want = (exp["adj_inc"], exp["adj_dec"], exp["adj_inc"] - exp["adj_dec"])
     add("Adjusted Qty  +increase  -decrease  net",
         bool(m) and all(_close(a, b, PDF_QTY_TOL) for a, b in zip(m.groups(), want)),
-        "+%g -%g net %g" % want, "+%s -%s net %s" % m.groups() if m else None)
+        f"formula: rows {ADJUSTMENT_ROWS}: Σ variance > 0 = +{want[0]:g}; Σ |variance < 0| = -{want[1]:g}; "
+        f"net = {want[0]:g} - {want[1]:g} = {want[2]:g}",
+        "+%s -%s net %s" % m.groups() if m else None)
     m = re.search(r"ADJUSTMENT VALUE\s*\+([\d.]+)\s*-([\d.]+)", flat, re.I)
     want = (exp["val_inc"], exp["val_dec"])
     add("Adjustment Value  +increase  -decrease",
         bool(m) and all(_close(a, b, PDF_VALUE_TOL) for a, b in zip(m.groups(), want)),
-        "+%g -%g" % want, "+%s -%s" % m.groups() if m else None)
+        f"formula: rows {ADJUSTMENT_ROWS}: Σ variance_value > 0 = +{want[0]:.2f}; "
+        f"Σ |variance_value < 0| = -{want[1]:.2f}",
+        "+%s -%s" % m.groups() if m else None)
 
     # ---- adjustment report -------------------------------------------
     sec = _pdf_after(flat, r"Adjustment Report", PDF_SECTION_ENDS[:1])
@@ -2561,7 +2804,8 @@ def _check_pdf_content(ck, st, pages, where):
         lost = [v["code"] for v in exp["adj"] if v["code"].upper() not in segs]
         extra = sorted(set(re.findall(r"\b[A-Z]{2,}\d+\b", sec)) - {v["code"].upper() for v in exp["adj"]})
         add("Adjustment Report lists exactly the adjusted rows", not lost and not extra,
-            [v["code"] for v in exp["adj"]], f"missing={lost} extra={extra}")
+            f"formula: {ADJUSTMENT_ROWS} = {len(exp['adj'])} row(s): {[v['code'] for v in exp['adj']]}",
+            f"missing={lost} extra={extra}")
         bad = {"Adj. Qty": [], "Adj. Value": [], "Type": [], "Loc": [], "Stock Qty": []}
         for v in exp["adj"]:
             seg = segs.get(v["code"].upper())
@@ -2579,13 +2823,27 @@ def _check_pdf_content(ck, st, pages, where):
                 bad["Loc"].append(f"{v['code']}: want {v['stock_location']}")
             if not any(_close(n, v["stock"], PDF_QTY_TOL) for n in ns):
                 bad["Stock Qty"].append(f"{v['code']}: want {v['stock']:g}")
+        col_rule = OrderedDict([
+            ("Adj. Qty", ("variance", lambda v: f"{v['variance']:+g}")),
+            ("Adj. Value", ("variance_value", lambda v: f"{v['variance_value']:+.2f}")),
+            ("Type", ("Increase if variance > 0 else Decrease",
+                      lambda v: ADJUSTMENT_TYPE_WORD[1 if v["variance"] > 0 else -1])),
+            ("Loc", ("stock_location", lambda v: v["stock_location"] or "-")),
+            ("Stock Qty", ("stock", lambda v: f"{v['stock']:g}")),
+        ])
         for col, items in bad.items():
-            add(f"Adjustment Report: {col} per row", not items, f"{len(exp['adj'])} row(s) match", "; ".join(items[:8]) or "match")
+            rule, shown = col_rule[col]
+            per_row = _sample([f"{v['code']}: {shown(v)}" for v in exp["adj"]])
+            add(f"Adjustment Report: {col} per row", not items,
+                f"formula: {rule} per adjusted row → {per_row}", "; ".join(items[:8]) or "match")
         m = re.search(r"TOTAL\s*([\d.]+)\s*([\d.]+)", sec)
         want = (sum(abs(v["variance"]) for v in exp["adj"]), sum(abs(v["variance_value"]) for v in exp["adj"]))
+        qty_terms = _sample([f"{abs(v['variance']):g}" for v in exp["adj"]], 8, " + ") or "0"
+        val_terms = _sample([f"{abs(v['variance_value']):.2f}" for v in exp["adj"]], 8, " + ") or "0"
         add("Adjustment Report TOTAL = Σ|adj. qty|, Σ|adj. value|",
             bool(m) and _close(m.group(1), want[0], PDF_QTY_TOL) and _close(m.group(2), want[1], PDF_VALUE_TOL),
-            "%g / %g" % want, "%s / %s" % m.groups() if m else None)
+            f"formula: Σ|variance| = {qty_terms} = {want[0]:g}; Σ|variance_value| = {val_terms} = {want[1]:.2f}",
+            "%s / %s" % m.groups() if m else None)
 
     # ---- verified items sections -------------------------------------
     heads = [(k, re.search(s["heading"], flat, re.I)) for k, s in PDF_SECTIONS.items()]
@@ -2593,11 +2851,12 @@ def _check_pdf_content(ck, st, pages, where):
                                                        for m_ in [re.search(rx, flat, re.I)] if m_]
     for key, m_ in heads:
         rows = exp["sections"][key]
+        rule = PDF_SECTIONS[key]["rule"]
         if m_ is None:
-            add(f"Section '{key}' shown", not rows, f"{len(rows)} row(s)", "heading not in the PDF")
+            add(f"Section '{key}' shown", not rows, f"formula: {rule} = {len(rows)} row(s)", "heading not in the PDF")
             continue
         add(f"Section '{key}' count (N) = rows meeting its rule", int(m_.group(1)) == len(rows),
-            f"{len(rows)} ({PDF_SECTIONS[key]['rule']})", m_.group(1))
+            f"formula: {rule} = {len(rows)} row(s)", m_.group(1))
         end = min([s for s in stops if s > m_.start()] or [len(flat)])
         seg_all = flat[m_.end():end]
         segs = _pdf_segments(seg_all, [v["code"] for v in rows])
@@ -2620,16 +2879,22 @@ def _check_pdf_content(ck, st, pages, where):
                 miss.append(f"status {v['resolution_status']}")
             if miss:
                 problems.append(f"{v['code']}: missing {', '.join(miss)}")
-        add(f"Section '{key}': every row correct", not problems, f"{len(rows)} row(s) match",
+        row_want = _sample([f"{v['code']}: aud={v['audited']:g}, var={v['variance']:+g}" for v in rows])
+        add(f"Section '{key}': every row correct", not problems,
+            f"formula: per row audited, variance = audited - stock, locations"
+            f"{', resolution status' if PDF_SECTIONS[key]['status_col'] else ''} → {row_want or 'no rows'}",
             "; ".join(problems[:8]) or f"{len(rows)} row(s) match")
-    add("Every report row is in a section", not exp["unplaced"], "none left out",
+    add("Every report row is in a section", not exp["unplaced"],
+        f"formula: rows meeting none of {list(PDF_SECTIONS)} = 0 of {len(st['rows'])} row(s)",
         [f"{v['code']} (status {v['resolution_status'] or '-'})" for v in exp["unplaced"]] or "none left out")
 
     # ---- unverified summary ------------------------------------------
     m = re.search(r"ITEMS ASSIGNED\s*(\d+)\s*COUNTED\s*(\d+)\s*NOT COUNTED \(UNVERIFIED\)\s*(\d+)", flat, re.I)
     want = (exp["items"], exp["lines_counted"], exp["not_counted"])
     got = tuple(int(x) for x in m.groups()) if m else None
-    add("Unverified Items Summary: assigned / counted / not counted", got == want, want, got)
+    add("Unverified Items Summary: assigned / counted / not counted", got == want,
+        f"formula: distinct ItemCode = {want[0]}; count({counted_rule}) = {want[1]}; "
+        f"{CHIP_RULES['Unverified']} = {want[2]}", got)
 
     # ---- closure note and footer -------------------------------------
     note_want = getattr(st["config"], "closure_note", None) or getattr(st["config"], "fc_closure_note", None)
@@ -2653,10 +2918,11 @@ def _check_pdf_content(ck, st, pages, where):
     foot = [(int(a), int(b)) for a, b in re.findall(r"Page (\d+) of (\d+)", flat)]     # either order of the two footer parts
     add("Footer 'Generated by Stockount · date · Page i of N' on every page",
         len(foot) == n == len(gen) and [f[0] for f in foot] == list(range(1, n + 1)) and all(f[1] == n for f in foot),
-        f"{n} page(s): Page 1 of {n} ... Page {n} of {n}, each with a 'Generated by' line",
+        f"formula: 1 footer per page × {n} page(s) = Page 1 of {n} ... Page {n} of {n}, {n} 'Generated by' line(s)",
         f"pages {foot or 'none'}, generated lines {len(gen)}")
     add("Audit Name in the header of every page", len(re.findall(r"Audit Name\s*:\s*" + re.escape(st["audit"]), flat)) == n,
-        f"{n}x {st['audit']}", len(re.findall(r"Audit Name\s*:\s*" + re.escape(st["audit"]), flat)))
+        f"formula: 1 per page × {n} page(s) = {n}x {st['audit']}",
+        len(re.findall(r"Audit Name\s*:\s*" + re.escape(st["audit"]), flat)))
 
 
 def _pdf_signature(pages):
@@ -2783,7 +3049,7 @@ def _check_export(ck, st):
         diff_extra, diff_lost = sorted(set(codes) - want_codes), sorted(want_codes - set(codes))
         ck.add(group, f"Sheet '{label}': rows = {chip} chip", set(codes) == want_codes and not dup
                and (count is None or len(codes) == count),
-               f"{len(want_codes)} row(s) from {source}; chip count {count}",
+               f"formula: {source} = {len(want_codes)} row(s); chip count = {count}",
                f"{len(codes)} row(s); only in export={diff_extra[:6]} only in UI={diff_lost[:6]} repeated={dup[:6]}")
 
     if all_name is None:
@@ -2804,7 +3070,8 @@ def _check_export(ck, st):
                 bad.append(f"{code}: not in the UI table")
             elif not _exp_equal(kind, field, rec.get(_key(h), ""), _cell(r, field)):
                 bad.append(f"{code}: export {rec.get(_key(h), '')!r} vs UI {_cell(r, field)!r}")
-        ck.add(group, f"All sheet: {field} = UI table", not bad, f"{len(recs[all_name])} row(s) equal",
+        ck.add(group, f"All sheet: {field} = UI table", not bad,
+               f"formula: export {h} == UI {field} per row ({kind}) = {len(recs[all_name])} row(s) equal",
                "; ".join(bad[:8]) or f"{len(recs[all_name])} row(s) equal")
 
     # ---- the file's own arithmetic (needs no UI) ------------------------
@@ -2813,15 +3080,17 @@ def _check_export(ck, st):
     audited = [rec for rec in recs[all_name] if not _not_audited(_row_vals(_exp_as_ui(rec)), na_codes)]
     for field, rule in ROW_FORMULAS.items():
         h, kind = EXPORT_FIELDS[field]
-        bad = []
+        bad, want_rows = [], []
         for rec in audited:
             v = _row_vals(_exp_as_ui(rec), {rec.get("itemcode", "").upper(): price(rec)})
             want = _calc(rule, **v)
+            want_rows.append(_row_sample(field, rule, v, want))
             got = rec.get(_key(h), "")
             ok = _blank(got) == _blank(want) if isinstance(want, str) else _close(_qn(got), want, EXPORT_TOL[kind])
             if not ok:
                 bad.append(f"{v['code']}: file {got!r} vs {want if isinstance(want, str) else round(want, 6)!r}")
-        ck.add(group, f"All sheet: {field} = {rule} (file's own numbers)", not bad, f"{len(audited)} row(s) match",
+        ck.add(group, f"All sheet: {field} = {rule} (file's own numbers)", not bad,
+               f"formula: {rule} (price = CostPrice) on {len(audited)} audited row(s) → {_sample(want_rows)}",
                "; ".join(bad[:8]) or f"{len(audited)} row(s) match")
     bad = [f"{rec.get('itemcode')}: {rec.get('auditeddate')!r}" for rec in recs[all_name]
            if _blank(rec.get("auditeddate")) and not _parse_date(rec["auditeddate"], EXPORT_DATE_FORMAT)]
@@ -2833,7 +3102,9 @@ def _check_export(ck, st):
     for card, col in (("Stock", "stockqty"), ("Audited", "auditedqty"), ("Damaged", "damagedqty")):
         if card in cards:
             tot = sum(_qn(r.get(col, "")) for r in recs[all_name])
-            ck.add(group, f"All sheet: Σ {col} = {card} card", _near(tot, cards[card]), cards[card], round(tot, 6))
+            ck.add(group, f"All sheet: Σ {col} = {card} card", _near(tot, cards[card]),
+                   f"formula: Σ {col} over {len(recs[all_name])} row(s) = {card} card = {cards[card]:g}",
+                   f"Σ {col} = {round(tot, 6):g}")
 
 
 def _check_charts(ck, st):
@@ -2857,7 +3128,8 @@ def _check_charts(ck, st):
         bad = [f"{cat}: chart {got.get(cat, 0.0):g} vs {w:g}" for cat, w in want.items() if not _near(got.get(cat, 0.0), w)]
         bad += [f"{cat}: chart {v:g}, not expected" for cat, v in got.items() if cat not in want and abs(v) > TOLERANCE]
         ck.add(group, f"{field} per category = Σ {rule}", not bad,
-               "; ".join(f"{cat}: {w:g}" for cat, w in want.items()),
+               f"formula: Σ {rule} per category (counted items) → "
+               + ("; ".join(f"{cat}: {w:.2f}" for cat, w in want.items()) or "no category"),
                "; ".join(bad) or "; ".join(f"{cat}: {v:g}" for cat, v in got.items()))
     labels = [_txt(x) for x in pie_data.get("labels", [])]
     data = (pie_data.get("datasets") or [{}])[0].get("data") or []
@@ -2866,7 +3138,9 @@ def _check_charts(ck, st):
         label = _find(field, labels)
         ck.add(group, f"Overall Variance {field} % = {DOUGHNUT_FORMULA.split(' if ')[0]}",
                label is not None and _near(got.get(label), pie[field], 0.01),
-               f"{pie[field]} (value {overall[field]:g} ÷ total variance {facts.get('total_variance', facts['stock_value']):g})",
+               f"formula: {DOUGHNUT_FORMULA} (value = Σ {CHART_FORMULAS[field]}, stock_value = total variance) → "
+               f"{_show(DOUGHNUT_FORMULA, value=overall[field], stock_value=facts.get('total_variance', facts['stock_value']))}"
+               f" = {pie[field]}",
                got.get(label) if label else "MISSING")
     st["doughnut_sum"] = sum(float(x or 0) for x in data)
 
@@ -2891,7 +3165,8 @@ def _check_findings(ck, st):
     facts = _ui_facts(st)
     for fid, title, cond in KNOWN_FINDINGS:
         seen = bool(_calc(cond, **facts))
-        ck.add("Spec findings", f"{fid}: {title}", True, "not seen", f"seen ({cond}; {facts})" if seen else "not seen",
+        ck.add("Spec findings", f"{fid}: {title}", True, f"formula: {cond} = False (not seen)",
+               f"seen ({_show(cond, **facts)} = True; {facts})" if seen else f"not seen ({_show(cond, **facts)} = False)",
                status="KNOWN" if seen else "PASS", finding=f"spec {fid}" if seen else "")
 
 
@@ -2922,7 +3197,8 @@ def _check_moved_rows(ck, group, moved, rows_after, completer, expect=None):
                 continue
             (known if known_rule and _calc(known_rule, **v) else bad).append(f"{code}: {_cell(r, field)!r}")
         status = "FAIL" if bad else "KNOWN" if known else "PASS"
-        ck.add(group, f"Step-2 items: {field} ({ok_rule})", not bad, f"{len(moved)} row(s) meet it",
+        ck.add(group, f"Step-2 items: {field} ({ok_rule})", not bad,
+               f"formula: {ok_rule} on all {len(moved)} step-2 row(s) → {_sample(moved, 8)}",
                "; ".join((bad or known)[:10]) + (f" (known: {known_rule})" if known and not bad else "")
                or f"{len(moved)} row(s) meet it",
                status=status, finding=f"spec {finding}" if (bad or known) and finding else "")
@@ -2965,7 +3241,7 @@ def check_move_to_not_found(page, config, folder=None) -> bool:
             popup = flow.get("unverified")
             ck.add(group, "Unverified step: 'There are N items not counted' = Un Verified items",
                    popup is not None and _calc(MOVE_NOT_FOUND_POPUP, popup=popup, before=before),
-                   f"N = {before.get('Unverified')} ({MOVE_NOT_FOUND_POPUP})",
+                   f"formula: {MOVE_NOT_FOUND_POPUP} → N = {before.get('Unverified')}",
                    f"N = {popup}; choice {choice!r}; popup steps: {[row[1] for row in res.rows]}")
             _ui_open_summary(page, config)
             _ui_summarize(page, "Item")
@@ -2976,7 +3252,8 @@ def check_move_to_not_found(page, config, folder=None) -> bool:
             after = _named_chips(_ui_chips(page))
             for chip, rule in chip_rules.items():
                 want = _calc(rule, before=before, moved=len(moved))
-                ck.add(group, f"{chip} chip after '{choice}' = {rule}", after.get(chip) == want, want,
+                ck.add(group, f"{chip} chip after '{choice}' = {rule}", after.get(chip) == want,
+                       f"formula: {rule} → {_show(rule, before=before, moved=len(moved))} = {want}",
                        f"{after.get(chip)} (before {before.get(chip)}, step-2 items {len(moved)})")
             rows_after = {_row_vals(r)["code"].upper(): r for r in _ui_all_rows(page)}
             _check_moved_rows(ck, group, moved, rows_after, completer, row_rules)
