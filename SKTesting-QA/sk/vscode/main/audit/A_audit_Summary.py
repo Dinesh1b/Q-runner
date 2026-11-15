@@ -915,7 +915,7 @@ MODE_SPEC = OrderedDict([
 DONE = "status in ('Completed', 'Auto Completed')"
 ACTION_RULES = OrderedDict([
     ("Stock Audit", {"where": "top", "show": "True"}),
-    ("Auditor Insights", {"where": "top", "show": "True", "check": "open"}),
+    ("Auditor Insights", {"where": "top", "show": "True", "check": "auditor_insights"}),
     ("Archive", {"where": "top", "show": "status != 'Archived'"}),
     ("Complete Audit", {"where": "top", "show": "status != 'Archived'", "disabled": DONE}),
     ("Download PDF", {"where": "table", "show": DONE, "check": "pdf"}),
@@ -1599,6 +1599,7 @@ def _check_table(ck, st):
     audited_rows = [r for r in st["rows"] if not _not_audited(_row_vals(r), not_audited_codes)]
     for field, rule in ROW_FORMULAS.items():           # variance formulas: audited line items only
         bad, checked = [], 0
+        got_samples, want_samples = [], []
         for r in audited_rows:
             v = _row_vals(r, st["prices"])
             if "price" in rule and v["price"] is None:
@@ -1609,14 +1610,28 @@ def _check_table(ck, st):
                    "Variance Type": v["variance_type"]}.get(field)
             if not (got == want if isinstance(want, str) else _near(got, want)):
                 bad.append(f"{v['code']}: {got} vs {want}")
+            else:
+                if field == "Variance":
+                    want_samples.append(f"{v['code']}: {want:+g}")
+                    got_samples.append(f"{v['code']}: {got:+g}")
+                elif field == "Variance Value":
+                    want_samples.append(f"{v['code']}: {want:+.2f}")
+                    got_samples.append(f"{v['code']}: {got:+.2f}")
+                else:
+                    want_samples.append(f"{v['code']}: {want}")
+                    got_samples.append(f"{v['code']}: {got}")
         if not checked:
             ck.not_run(group, f"{field} = {rule}", "no price (export not read)")
         else:
-            ck.add(group, f"{field} = {rule}", not bad, f"{checked} row(s) match", "; ".join(bad[:8]) or f"{checked} row(s) match")
+            exp_text = ", ".join(want_samples[:6]) + (f" (+{len(want_samples)-6} more)" if len(want_samples) > 6 else "")
+            act_text = "; ".join(bad[:8]) if bad else (", ".join(got_samples[:6]) + (f" (+{len(got_samples)-6} more)" if len(got_samples) > 6 else ""))
+            ck.add(group, f"{field} = {rule}", not bad, exp_text, act_text)
     fmt = DATE_FORMATS["Audited Date"]
     bad = [f"{_row_vals(r)['code']}: {_cell(r, 'Audited Date')!r}" for r in st["rows"]
            if _blank(_cell(r, "Audited Date")) and not _parse_date(_cell(r, "Audited Date"), fmt)]
-    ck.add(group, f"Audited Date format {fmt}", not bad, fmt, "; ".join(bad[:8]) or "all dates match")
+    date_samples = [f"{_row_vals(r)['code']}: {_cell(r, 'Audited Date')}" for r in audited_rows if _blank(_cell(r, "Audited Date"))]
+    act_dates = "; ".join(bad[:8]) if bad else (", ".join(date_samples[:6]) + (f" (+{len(date_samples)-6} more)" if len(date_samples) > 6 else ""))
+    ck.add(group, f"Audited Date format {fmt}", not bad, f"format {fmt} on every audited row", act_dates or "no dates")
     _check_not_audited(ck, st, audited_rows)
 
 
@@ -1635,13 +1650,230 @@ def _check_not_audited(ck, st, audited_rows):
         if not not_audited:
             break
         bad = [f"{_row_vals(r)['code']}: {_cell(r, field)!r}" for r in not_audited if not _calc(rule, **_row_vals(r))]
-        ck.add(group, f"Not audited: {field} ({rule})", not bad, f"{len(not_audited)} row(s) meet it",
-               "; ".join(bad[:10]) or f"{len(not_audited)} row(s) meet it",
+        samples = [f"{_row_vals(r)['code']}: {_cell(r, field)!r}" for r in not_audited]
+        exp_text = f"{field} meets {rule} on all {len(not_audited)} uncounted item(s)"
+        act_text = "; ".join(bad[:10]) if bad else (", ".join(samples[:8]) + (f" (+{len(samples)-8} more)" if len(samples) > 8 else ""))
+        ck.add(group, f"Not audited: {field} ({rule})", not bad, exp_text, act_text,
                finding=f"spec {finding}" if bad and finding else "")
     for field, rule in AUDITED_EXPECT.items():
         bad = [f"{_row_vals(r)['code']}: {_cell(r, field)!r}" for r in audited_rows if not _calc(rule, **_row_vals(r))]
-        ck.add(group, f"Audited: {field} shown ({rule})", not bad, f"{len(audited_rows)} row(s) meet it",
-               "; ".join(bad[:10]) or f"{len(audited_rows)} row(s) meet it")
+        samples = [f"{_row_vals(r)['code']}: {_cell(r, field)!r}" for r in audited_rows]
+        exp_text = f"{field} shown ({rule}) on all {len(audited_rows)} audited row(s)"
+        act_text = "; ".join(bad[:10]) if bad else (", ".join(samples[:6]) + (f" (+{len(samples)-6} more)" if len(samples) > 6 else ""))
+        ck.add(group, f"Audited: {field} shown ({rule})", not bad, exp_text, act_text)
+
+
+def _check_location_view(ck, st, page, rows):
+    """Deep validation of Summarize As = 'Location' mode per skill_audit/04-summarize-as-location.md:
+    1. Table columns & values (§3): Variance, Variance Value, Variance Type (never-counted = 0/0/'-').
+    2. Stock Location (blank for excess, 'Unassigned' for blank sheet loc) vs Audited Location (blank for uncounted).
+    3. Location filter chips / badges (§4): All, Matched, Unverified, Not Found, Excess, Positive, Negative, Location Conflict.
+    4. Location table filter: clicking active filter badges and verifying filtered rows.
+    5. Location Metric Cards (§5): Stock (partitioned by ItemCode, StockLocation), Audited, Damaged.
+    6. Search filter (§6): search by item code filters rows.
+    """
+    group = "Location View"
+    prices = st["prices"]
+    loc_vals = [_row_vals(r, prices) for r in rows]
+
+    # --- 1. Columns & Values on every row (doc 04 §3, §8 finding 1, §8 finding 8, §9) ---
+    bad_val, bad_type = [], []
+    for v in loc_vals:
+        is_audited = (v["audited"] > 0) or bool(v["auditor"])
+        want_val = ((v["audited"] - v["stock"]) * v["price"]) if (is_audited and v["price"] is not None) else 0.0
+        want_type = ("Positive" if v["audited"] > v["stock"] else "Negative" if v["audited"] < v["stock"] else "-") if is_audited else "-"
+        if v["price"] is not None and not _near(v["variance_value"], want_val):
+            bad_val.append(f"{v['code']}: got {v['variance_value']} vs {want_val}")
+        if v["variance_type"] != want_type and not (not is_audited and v["variance_type"] in ("-", "Not Audited")):
+            bad_type.append(f"{v['code']}: got {v['variance_type']!r} vs {want_type!r}")
+    val_samples = [
+        f"{v['code']}: ({v['audited']:g} - {v['stock']:g}) * {v['price']:.2f} = {v['variance_value']:+.2f}"
+        if (v["price"] is not None and ((v["audited"] > 0) or bool(v["auditor"])))
+        else f"{v['code']}: 0.00 (uncounted)" if not ((v["audited"] > 0) or bool(v["auditor"]))
+        else f"{v['code']}: {v['variance_value']:+.2f}"
+        for v in loc_vals
+    ]
+    ck.add(group, "Location: Variance Value = (audited - stock) * price / 0", not bad_val,
+           "formula (audited - stock) * price on counted rows; 0.00 on never-counted rows (§8 F1)",
+           "; ".join(bad_val[:6]) if bad_val else (", ".join(val_samples[:6]) + (f" (+{len(val_samples)-6} more)" if len(val_samples) > 6 else "")))
+
+    type_samples = [f"{v['code']}: {v['variance_type']}" for v in loc_vals]
+    ck.add(group, "Location: Variance Type = Positive/Negative/- (audited) / '-' (never counted)", not bad_type,
+           "Positive (audited > stock), Negative (audited < stock), '-' (equal or never-counted §8 F1)",
+           "; ".join(bad_type[:6]) if bad_type else (", ".join(type_samples[:8]) + (f" (+{len(type_samples)-8} more)" if len(type_samples) > 8 else "")))
+
+    # --- 2. Stock Location vs Audited Location (doc 04 §2.5, §3, §8 finding 6, §9) ---
+    bad_loc = []
+    case_breakdown = []
+    for v in loc_vals:
+        code = v["code"]
+        stk_loc = v["stock_location"].strip()
+        aud_loc = v["audited_location"].strip()
+        stk = v["stock"]
+        aud = v["audited"]
+        has_auditor = bool(v["auditor"])
+        is_counted = (aud > 0) or has_auditor
+        has_sheet = (stk > 0)
+
+        # §8 Finding 6: Blank vs "Unassigned" semantics
+        # Stock Location blank = no sheet side (excess/off-sheet); "Unassigned" = sheet row without a location.
+        # Audited Location blank = never counted; "Unassigned" = counted without a location.
+
+        if not is_counted and has_sheet:
+            # §2.5 Case 6: On sheet, never counted -> Audited Location MUST be strictly blank ''
+            if aud_loc != "":
+                bad_loc.append(f"{code} (Case 6 Uncounted): Audited Location must be blank '', got {aud_loc!r}")
+            elif stk_loc == "":
+                bad_loc.append(f"{code} (Case 6 Uncounted): Stock Location cannot be blank for sheet row (should be loc name or 'Unassigned')")
+            else:
+                case_breakdown.append(f"Case 6 Uncounted {code}: StockLoc='{stk_loc}', AudLoc=''")
+
+        elif is_counted and not has_sheet:
+            # §2.5 Cases 3, 4, 5, 7: Excess (no sheet side) -> Stock Location MUST be strictly blank ''
+            if stk_loc != "":
+                bad_loc.append(f"{code} (Excess): Stock Location must be blank '', got {stk_loc!r}")
+            elif aud_loc == "":
+                bad_loc.append(f"{code} (Excess): Audited Location cannot be blank when counted")
+            else:
+                case_lbl = "Case 4/5 Excess Unassigned" if aud_loc.upper() == "UNASSIGNED" else "Case 3/5/7 Excess Located"
+                case_breakdown.append(f"{case_lbl} {code}: StockLoc='', AudLoc='{aud_loc}'")
+
+        elif is_counted and has_sheet:
+            # §2.5 Cases 1 & 2: Counted sheet item
+            if stk_loc == "":
+                bad_loc.append(f"{code} (Sheet count): Stock Location cannot be blank for sheet row")
+            elif aud_loc == "":
+                bad_loc.append(f"{code} (Sheet count): Audited Location cannot be blank for counted item")
+            elif stk_loc.upper() == "UNASSIGNED" and aud_loc.upper() == "UNASSIGNED":
+                case_breakdown.append(f"Case 2 Sheet Unassigned {code}: StockLoc='Unassigned', AudLoc='Unassigned'")
+            elif stk_loc == aud_loc:
+                case_breakdown.append(f"Case 1 Matched {code}: StockLoc='{stk_loc}', AudLoc='{aud_loc}'")
+            else:
+                case_breakdown.append(f"Case 3 Split Location {code}: StockLoc='{stk_loc}', AudLoc='{aud_loc}'")
+
+    ck.add(group, "Location: Stock Location blank for excess, Audited Location blank for uncounted (§8 F6)", not bad_loc,
+           "Excess: StockLoc='', Uncounted: AudLoc='', Counted: AudLoc non-empty, Sheet: StockLoc non-empty",
+           "; ".join(bad_loc[:6]) if bad_loc else ("; ".join(case_breakdown[:8]) + (f" (+{len(case_breakdown)-8} more)" if len(case_breakdown) > 8 else "")))
+
+    # --- Batch in Location mode: ONLY check when inventory type is 'batch' (skip for 'unit' and 'serialized') ---
+    offered_options = st.get("options") or []
+    is_batch = (_find("Batch", offered_options) is not None) or (getattr(st.get("config"), "invType", "").upper() in ("B", "BATCH"))
+    if is_batch:
+        heads = _ui_headers(page)
+        batch_col = _find("Batch No", heads) or _find("Batch", heads)
+        if batch_col:
+            batch_keys = [tuple(_txt(_cell(r, k)) for k in ["Item Code", "Stock Location", "Audited Location"]) for r in rows]
+            dup_locs = sorted({k for k in batch_keys if batch_keys.count(k) > 1})
+            ck.add(group, "Batch in Location mode: one row per location", not dup_locs, "unique per location",
+                   f"repeated={dup_locs[:5]}" if dup_locs else "one row per location")
+            multi_batch = [f"{_cell(r, 'Item Code')}: {_cell(r, batch_col)}" for r in rows if "," in _cell(r, batch_col)]
+            ck.add(group, "Batch in Location mode: one batch shown per row", not multi_batch, "one batch per row",
+                   f"multi-batch rows: {multi_batch[:5]}" if multi_batch else "one batch shown per row")
+
+    # --- 3. Summary Tiles (Metric strip) with Qty (doc 04 §5) ---
+    loc_qty = _ui_cards(page, "Qty")
+    seen_stock = set()
+    exp_stock = 0.0
+    for v in loc_vals:
+        key = (v["code"].upper(), v["stock_location"])
+        if key not in seen_stock:
+            seen_stock.add(key)
+            exp_stock += v["stock"]
+    exp_audited = sum(v["audited"] for v in loc_vals)
+    exp_damaged = sum(v["damaged"] for v in loc_vals)
+    label_stock = _find("Stock Quantity", list(loc_qty))
+    label_audited = _find("Audited Quantity", list(loc_qty))
+    label_damaged = _find("Damaged Quantity", list(loc_qty))
+    if label_stock:
+        ck.add(group, "Location: Stock card = Σ distinct (ItemCode, StockLocation) stock",
+               _near(loc_qty[label_stock], exp_stock),
+               f"Stock Qty = {exp_stock:g} (Σ distinct ItemCode x StockLocation)",
+               f"{loc_qty[label_stock]:g}")
+    if label_audited:
+        ck.add(group, "Location: Audited card = Σ audited",
+               _near(loc_qty[label_audited], exp_audited),
+               f"Audited Qty = {exp_audited:g}",
+               f"{loc_qty[label_audited]:g}")
+    if label_damaged:
+        ck.add(group, "Location: Damaged card = Σ damaged",
+               _near(loc_qty[label_damaged], exp_damaged),
+               f"Damaged Qty = {exp_damaged:g}",
+               f"{loc_qty[label_damaged]:g}")
+
+    # --- 4. Filter Chips (Badges) in Location Mode (doc 04 §4) ---
+    loc_chips = _ui_chips(page)
+    loc_chip_rules = OrderedDict([
+        ("All", "True"),
+        ("Matched Line Item", "audited == stock"),
+        ("Unverified", "stock > 0 and audited == 0 and auditor == ''"),
+        ("Not Found", "stock > 0 and audited == 0 and auditor != ''"),
+        ("Excess Line Item", "stock == 0 and audited > 0"),
+        ("Positive Variance", "audited > stock"),
+        ("Negative Variance", "auditor != '' and audited < stock"),
+        ("Location Conflict", "audited > 0 and stock_location != audited_location"),
+        ("Cross Checked Audit", "cross_audited > 0"),
+        ("Damaged Report", "damaged > 0"),
+    ])
+    exp_chips = OrderedDict((k, sum(1 for v in loc_vals if _calc(r, **v))) for k, r in loc_chip_rules.items())
+    for field, want_cnt in exp_chips.items():
+        chip_lbl = _find(field, list(loc_chips))
+        if chip_lbl is None:
+            continue
+        got_cnt = loc_chips[chip_lbl]
+        ck.add(group, f"Location: {field} chip count = rows meeting its rule", got_cnt == want_cnt,
+               f"{want_cnt} row(s) ({loc_chip_rules[field]})", f"{got_cnt} row(s)")
+
+    # --- 5. Table Filter: Badge Clicking in Location Mode (doc 04 §4) ---
+    for field, want_cnt in exp_chips.items():
+        if field == "All" or want_cnt == 0:
+            continue
+        chip_lbl = _find(field, list(loc_chips))
+        if chip_lbl is None:
+            continue
+        try:
+            filt_rows, note = _ui_rows_retry(page, st, lambda: _ui_chip(page, chip_lbl), True)
+            filt_vals = [_row_vals(r, prices) for r in filt_rows]
+            bad_filt = [v["code"] for v in filt_vals if not _calc(loc_chip_rules[field], **v)]
+            ck.add(group, f"Location: Filter chip '{field}' lists {want_cnt} row(s) meeting its rule",
+                   len(filt_rows) == want_cnt and not bad_filt,
+                   f"{want_cnt} row(s) meeting {loc_chip_rules[field]}",
+                   f"{len(filt_rows)} row(s); non-matching={bad_filt}{note}")
+        except Exception as e:
+            ck.error(group, f"Location: Filter chip '{field}' table filter", e)
+
+    # Return badge to 'All'
+    all_lbl = _find("All", list(loc_chips))
+    if all_lbl:
+        _ui_chip(page, all_lbl)
+
+    # --- 6. Search / Table Filter Test (doc 04 §6) ---
+    search_input = page.locator(f"{UI_SUMMARY} input[placeholder*='Search']").first
+    if not search_input.count():
+        search_input = page.locator(f"{UI_SUMMARY} .search-box input, {UI_SUMMARY} input.p-inputtext").first
+    if search_input.count() and loc_vals:
+        test_code = loc_vals[0]["code"]
+        matching_codes = [v["code"] for v in loc_vals if test_code.upper() in v["code"].upper()]
+        exp_matches = len(matching_codes)
+        try:
+            search_input.fill(test_code)
+            _ui_settle(page, 1000)
+            _ui_wait_rows(page)
+            s_rows = _ui_all_rows(page)
+            s_codes = [_txt(_cell(r, "Item Code")) for r in s_rows]
+            ck.add(group, f"Location: Table Search '{test_code}' filters table rows",
+                   len(s_rows) == exp_matches,
+                   f"{exp_matches} row(s) matching '{test_code}': {matching_codes[:5]}",
+                   f"{len(s_rows)} row(s): {s_codes[:5]}")
+            clear_btn = page.locator(f"{UI_SUMMARY} i.pi-times, {UI_SUMMARY} .clear-btn, {UI_SUMMARY} span.search-close").first
+            if clear_btn.count() and clear_btn.is_visible():
+                clear_btn.click()
+            else:
+                search_input.fill("")
+                search_input.dispatch_event("input")
+            _ui_settle(page, 1000)
+            _ui_wait_rows(page)
+        except Exception as e:
+            ck.error(group, f"Location: Table Search test ({test_code})", e)
 
 
 def _check_options(ck, st, page):
@@ -1695,17 +1927,26 @@ def _check_options(ck, st, page):
                 if not (stock_ok and _near(p["audited"], iv["audited"]) and _near(p["damaged"], iv["damaged"])):
                     bad.append(f"{code}: stock {p['stock']} audited {p['audited']:g} damaged {p['damaged']:g} "
                                f"vs Item view {iv['stock']:g}/{iv['audited']:g}/{iv['damaged']:g}")
+            sample_per = [f"{code}: stk={iv['stock']:g}, aud={p['audited']:g}, dam={p['damaged']:g}"
+                          for code, p in list(per.items())[:6] if (iv := item_view.get(code))]
             ck.add(group, f"{option}: rows add up to the Item view per item", not bad,
-                   f"stock {spec['stock']}, audited and damaged summed", "; ".join(bad[:6]) or f"{len(per)} item(s) match")
+                   f"stock {spec['stock']}, audited and damaged summed",
+                   "; ".join(bad[:6]) if bad else (", ".join(sample_per) + f" ({len(per)} item(s) match)"))
             bad = []
+            var_samples = []
             for r in unit_rows:                          # not audited line items: variance 0 (NOT_AUDITED_EXPECT)
                 v = _row_vals(r, st["prices"])
                 not_audited = _not_audited(v, (st.get("chip_lists") or {}).get(NOT_AUDITED_CHIP))
                 want = 0 if not_audited else _calc(ROW_FORMULAS["Variance"], **v)
                 if not _near(v["variance"], want):
                     bad.append(f"{v['code']}: {v['variance']:g} vs {want:g}")
+                else:
+                    var_samples.append(f"{v['code']}: {v['variance']:+g}")
             ck.add(group, f"{option}: Variance = {ROW_FORMULAS['Variance']} (audited) / 0 (not audited)", not bad,
-                   "every row", "; ".join(bad[:6]) or f"{len(unit_rows)} row(s) match")
+                   f"formula {ROW_FORMULAS['Variance']} (audited) / 0 (uncounted)",
+                   "; ".join(bad[:6]) if bad else (", ".join(var_samples[:8]) + (f" (+{len(var_samples)-8} more)" if len(var_samples) > 8 else "")))
+            if option == "Location":
+                _check_location_view(ck, st, page, rows)
     except Exception as e:
         ck.error(group, "Summarize As options", e)
     finally:
@@ -1737,14 +1978,8 @@ def _check_actions(ck, st, page):
             continue
         try:
             how = rule.get("check")
-            if how == "open":
-                pool[label].click()
-                dlg = page.locator("div.auditor-summary-dialog").first
-                dlg.wait_for(state="visible", timeout=15000)
-                heads = [_txt(h) for h in dlg.locator("thead th").all_inner_texts()]
-                dlg.locator("button.close-btn").first.click()
-                dlg.wait_for(state="hidden", timeout=5000)
-                ck.add(group, f"{field} opens and closes", bool(heads), "dialog with columns", f"columns={heads}")
+            if how in ("open", "auditor_insights"):
+                _check_auditor_insights(ck, st, page, pool[label])
             elif how == "xlsx":
                 ok = bool(st["export_path"]) and os.path.getsize(st["export_path"]) > 0
                 ck.add(group, f"{field} downloads the report", ok, "a non-empty .xlsx",
@@ -1775,6 +2010,331 @@ def _check_clipboard(ck, st, page, button):
     ck.add(group, "Copy Table copies the header and every row shown", bool(lines) and not lost and len(found) == len(codes),
            f"header with the table fields + {len(codes)} row(s)",
            f"{len(lines)} line(s); rows found {len(found)}/{len(codes)}; header missing={lost}")
+
+
+def _check_auditor_insights(ck, st, page, button):
+    """Deep validation of Auditor Insights dialog per skill_audit/01-audit-details-and-kpis.md §4:
+    1. Dialog lifecycle: opens cleanly, header title 'Auditor Summary'.
+    2. Header action controls: Search input, Refresh button, Copy Table button, Close button.
+    3. Table columns in thead: Auditor, Completed Inventory, Audited Value, Damaged Value,
+       Elapsed Timing, Progress, Status, Action.
+    4. Row-level data validation in tbody:
+       - Auditor full name (from title tooltip or cell text).
+       - Completed Inventory: formatAuditQuantity (non-negative numeric).
+       - Audited Value & Damaged Value: formatAuditValue (non-negative numeric).
+       - Elapsed Timing: format HH:mm (hours can exceed 24).
+       - Progress: bar + percentage text between 0% and 100%.
+       - Status: 'Yet to Start', 'In Progress', 'Completed', or 'Unknown'.
+       - Action: 'Finish' or 'Reopen' link (or disabled).
+    5. Header tile cross-check: auditor names in dialog match assigned auditors.
+    6. Total row in tfoot:
+       - 'Total' label in first cell.
+       - Total Completed Inventory = sum of auditor row completed quantities.
+       - Total Audited Value = sum of auditor row audited values.
+       - Total Damaged Value = sum of auditor row damaged values.
+       - Elapsed Timing, Progress, Status, Action display '--'.
+    7. Functional search filtering & Finding F9 verification:
+       - Type auditor name -> rows filter to matching auditor.
+       - Verify F9: Total row ignores search filter (sums unfiltered Auditdata).
+       - Clear search input -> restores all rows.
+    8. Dialog close: clicking close-btn cleanly hides dialog.
+    """
+    group = "Auditor Insights"
+    button.click()
+    dlg = page.locator("div.auditor-summary-dialog").first
+    try:
+        dlg.wait_for(state="visible", timeout=25000)
+    except Exception as e:
+        ck.add(group, "Auditor Insights dialog opens", False, "dialog visible", f"timed out: {e}")
+        return
+
+    # Wait for the auditor summary API call & table rows to finish loading (wait up to 25s)
+    wait_spinner(page, timeout=25000)
+    for _ in range(50):  # poll up to 25s (50 x 500ms)
+        tr_loc = dlg.locator("tbody.p-datatable-tbody > tr")
+        tf_loc = dlg.locator("tfoot.p-datatable-tfoot tr")
+        if tr_loc.count() > 0 and tf_loc.count() > 0:
+            if _txt(tr_loc.first.inner_text()):
+                break
+        page.wait_for_timeout(500)
+    _ui_settle(page, 1500)
+
+    # 1. Dialog title
+    title_el = dlg.locator(".auditor-summary-title .title, .p-dialog-title").first
+    title_text = _txt(title_el.inner_text()) if title_el.count() else ""
+    ck.add(group, "Dialog title is 'Auditor Summary'", "auditor summary" in title_text.lower(), "Auditor Summary", title_text)
+
+    # 2. Controls in header
+    search_input = dlg.locator(".auditor-summary-actions input.p-inputtext, input[placeholder*='Search']").first
+    refresh_btn = dlg.locator(".auditor-summary-actions button.btn-light, button:has(i.bi-arrow-clockwise)").first
+    copy_btn = dlg.locator("app-table-copy-button button, button:has(i.bi-clipboard)").first
+    close_btn = dlg.locator("button.close-btn, button:has(i.bi-x-lg)").first
+
+    controls_ok = (search_input.count() > 0 and refresh_btn.count() > 0 and
+                   copy_btn.count() > 0 and close_btn.count() > 0)
+    ck.add(group, "Header controls present (Search, Refresh, Copy Table, Close)",
+           controls_ok, "all 4 controls present",
+           f"search={search_input.count() > 0}, refresh={refresh_btn.count() > 0}, copy={copy_btn.count() > 0}, close={close_btn.count() > 0}")
+
+    # 3. Columns in thead
+    raw_heads = [_txt(h) for h in dlg.locator("thead th").all_inner_texts()]
+    req_cols = ["Auditor", "Completed Inventory", "Audited Value", "Damaged Value", "Elapsed Timing", "Progress", "Status", "Action"]
+    missing_cols = [req for req in req_cols if not any(_key(req) in _key(h) for h in raw_heads)]
+    ck.add(group, "All Auditor Insights table columns shown", not missing_cols,
+           ", ".join(req_cols), f"missing={missing_cols}; actual={raw_heads}")
+
+    # 4. Table rows in tbody
+    row_els = dlg.locator("tbody.p-datatable-tbody > tr").all()
+    ck.add(group, "Auditor rows rendered", len(row_els) > 0, ">= 1 auditor row", f"{len(row_els)} row(s)")
+
+    parsed_rows = []
+    bad_quantities = []
+    bad_values = []
+    bad_timings = []
+    bad_progresses = []
+    bad_statuses = []
+    bad_actions = []
+
+    for r in row_els:
+        tds = r.locator("td").all()
+        if len(tds) < 8:
+            continue
+        # Auditor name: from title attr or inner text
+        aud_name = _txt(tds[0].get_attribute("title") or tds[0].inner_text())
+        completed_txt = _txt(tds[1].inner_text())
+        aud_val_txt = _txt(tds[2].inner_text())
+        dam_val_txt = _txt(tds[3].inner_text())
+        timing_txt = _txt(tds[4].inner_text())
+        prog_txt = _txt(tds[5].inner_text())
+        status_txt = _txt(tds[6].inner_text())
+        action_txt = _txt(tds[7].inner_text())
+
+        completed = _qn(completed_txt)
+        aud_val = _qn(aud_val_txt)
+        dam_val = _qn(dam_val_txt)
+
+        # Action link element & disabled state
+        act_link = tds[7].locator("a, button").first
+        act_disabled = False
+        if act_link.count():
+            aria_dis = (act_link.get_attribute("aria-disabled") or "").lower()
+            cls_str = (act_link.get_attribute("class") or "").lower()
+            act_disabled = aria_dis == "true" or "disabled" in cls_str or act_link.is_disabled()
+
+        parsed_rows.append({
+            "name": aud_name,
+            "completed": completed,
+            "audited_val": aud_val,
+            "damaged_val": dam_val,
+            "timing": timing_txt,
+            "progress": prog_txt,
+            "status": status_txt,
+            "action": action_txt,
+            "action_disabled": act_disabled,
+        })
+
+        # Validate Completed Inventory format (non-negative number)
+        if completed < 0 or not re.match(r"^\d+(\.\d+)?$", completed_txt.replace(",", "")):
+            bad_quantities.append(f"{aud_name}: {completed_txt}")
+
+        # Validate Audited Value & Damaged Value
+        if aud_val < 0 or dam_val < 0:
+            bad_values.append(f"{aud_name}: aud={aud_val_txt}, dam={dam_val_txt}")
+
+        # Elapsed Timing format HH:mm (hours can exceed 24)
+        if not re.match(r"^\d{2,}:\d{2}$", timing_txt):
+            bad_timings.append(f"{aud_name}: {timing_txt}")
+
+        # Progress format (contains number %)
+        m_prog = re.search(r"(\d+(\.\d+)?)\s*%", prog_txt)
+        if not m_prog or not (0.0 <= float(m_prog.group(1)) <= 100.0):
+            bad_progresses.append(f"{aud_name}: {prog_txt}")
+
+        # Status: known label
+        known_statuses = ("yet to start", "in progress", "completed", "unknown")
+        if status_txt.lower() not in known_statuses:
+            bad_statuses.append(f"{aud_name}: {status_txt}")
+
+        # Action: Finish, Reopen, or empty
+        if action_txt.lower() not in ("finish", "reopen", ""):
+            bad_actions.append(f"{aud_name}: {action_txt}")
+
+    aud_comp_str = ", ".join(f"{r['name']}: {r['completed']:g}" for r in parsed_rows)
+    tot_comp = sum(r['completed'] for r in parsed_rows)
+    ck.add(group, "Completed Inventory is non-negative numeric quantity",
+           not bad_quantities, ">= 0 numeric qty per auditor",
+           "; ".join(bad_quantities[:5]) if bad_quantities else f"{aud_comp_str} (Total: {tot_comp:g})")
+
+    aud_val_str = "; ".join(f"{r['name']}: aud={r['audited_val']:.2f}, dam={r['damaged_val']:.2f}"
+                            for r in parsed_rows if r['audited_val'] > 0 or r['damaged_val'] > 0)
+    if not aud_val_str:
+        aud_val_str = "all auditors: 0.00 / 0.00"
+    else:
+        zero_cnt = sum(1 for r in parsed_rows if r['audited_val'] == 0 and r['damaged_val'] == 0)
+        if zero_cnt > 0:
+            aud_val_str += f"; ({zero_cnt} other auditor(s): 0.00)"
+    ck.add(group, "Audited Value and Damaged Value are non-negative numeric",
+           not bad_values, ">= 0 for Audited & Damaged Value",
+           "; ".join(bad_values[:5]) if bad_values else aud_val_str)
+
+    aud_timing_str = ", ".join(f"{r['name']}: {r['timing']}" for r in parsed_rows)
+    ck.add(group, "Elapsed Timing format is HH:mm",
+           not bad_timings, "HH:mm on every row",
+           "; ".join(bad_timings[:5]) if bad_timings else aud_timing_str)
+
+    aud_prog_str = ", ".join(f"{r['name']}: {r['progress']}" for r in parsed_rows)
+    ck.add(group, "Progress is formatted percentage between 0% and 100%",
+           not bad_progresses, "0% to 100% formatted percentage per auditor",
+           "; ".join(bad_progresses[:5]) if bad_progresses else aud_prog_str)
+
+    aud_st_str = ", ".join(f"{r['name']}: {r['status']}" for r in parsed_rows)
+    ck.add(group, "Status is one of Yet to Start / In Progress / Completed / Unknown",
+           not bad_statuses, "known status labels",
+           "; ".join(bad_statuses[:5]) if bad_statuses else aud_st_str)
+
+    # Status formula rules:
+    # - Yet to Start: auditor has not started counting (completed == 0, progress == 0%)
+    # - In Progress: auditor has started counting (completed > 0 or progress > 0%)
+    # - Completed: auditor has finished audit
+    bad_status_rules = []
+    for r in parsed_rows:
+        st_low = r["status"].lower()
+        if st_low == "yet to start":
+            m_p = re.search(r"(\d+(\.\d+)?)\s*%", r["progress"])
+            prog_val = float(m_p.group(1)) if m_p else 0.0
+            if r["completed"] > 0 or prog_val > 0.0:
+                bad_status_rules.append(f"{r['name']}: status='Yet to Start' but completed={r['completed']}, prog={r['progress']}")
+        elif st_low in ("in progress", "completed"):
+            pass  # in progress or completed
+    ck.add(group, "Status consistency: Yet to Start requires completed = 0 and Progress = 0%",
+           not bad_status_rules, "Yet to Start rows have 0 completed / 0% progress",
+           "; ".join(bad_status_rules[:5]) or f"{len(parsed_rows)} row(s) match")
+
+    # Action link name rule:
+    # - When auditor status is Completed -> Action shows 'Reopen'
+    # - When auditor status is Yet to Start or In Progress -> Action shows 'Finish'
+    bad_action_texts = []
+    for r in parsed_rows:
+        st_low = r["status"].lower()
+        act_low = r["action"].lower()
+        if st_low in ("completed", "complete"):
+            if act_low != "reopen":
+                bad_action_texts.append(f"{r['name']}: status='{r['status']}' expected Action='Reopen', got '{r['action']}'")
+        elif st_low in ("yet to start", "in progress"):
+            if act_low != "finish":
+                bad_action_texts.append(f"{r['name']}: status='{r['status']}' expected Action='Finish', got '{r['action']}'")
+    ck.add(group, "Action link: Completed auditors show 'Reopen', others show 'Finish'",
+           not bad_action_texts, "Completed -> Reopen, Yet to Start / In Progress -> Finish",
+           "; ".join(bad_action_texts[:5]) or f"{len(parsed_rows)} row(s) match")
+
+    # Action disabled rule:
+    # - In Resolution or Completed audit status -> Action links (Finish/Reopen) are DISABLED
+    # - Active / In Progress audit status -> Action links are ENABLED
+    audit_status = st.get("status", "")
+    audit_is_closed = audit_status in ("In Resolution", "Completed", "Auto Completed")
+    bad_action_disabled = []
+    for r in parsed_rows:
+        if audit_is_closed and not r["action_disabled"]:
+            bad_action_disabled.append(f"{r['name']}: audit is '{audit_status}', expected Action disabled, but was enabled")
+        elif (not audit_is_closed and audit_status == "In Progress") and r["action_disabled"]:
+            bad_action_disabled.append(f"{r['name']}: audit is '{audit_status}', expected Action enabled, but was disabled")
+    ck.add(group, f"Action disabled state conforms to audit status ('{audit_status}')",
+           not bad_action_disabled,
+           "Action disabled when audit In Resolution / Completed; enabled when In Progress",
+           "; ".join(bad_action_disabled[:5]) or f"all {len(parsed_rows)} row(s) conform")
+
+    # 5. Assigned auditors check (spec §4 & Finding F13)
+    assigned_tile = st.get("tiles", {}).get(_find("Auditor(s)", list(st.get("tiles", {}))) or "")
+    if assigned_tile:
+        assigned_names = [a.strip().lower() for a in assigned_tile.split(",") if a.strip()]
+        aud_names_in_dlg = [r["name"].lower() for r in parsed_rows]
+        matched = [a for a in assigned_names if any(a in d or d in a for d in aud_names_in_dlg)]
+        ck.add(group, "Assigned auditors from header are present in dialog",
+               len(matched) == len(assigned_names),
+               f"all {len(assigned_names)} assigned auditor(s)",
+               f"{len(matched)}/{len(assigned_names)} present: {matched}")
+
+    # 6. Total row (tfoot)
+    tfoot_tr = dlg.locator("tfoot.p-datatable-tfoot tr").first
+    if tfoot_tr.count() > 0:
+        tfoot_tds = tfoot_tr.locator("td").all()
+        if len(tfoot_tds) >= 8:
+            tfoot_label = _txt(tfoot_tds[0].inner_text())
+            total_completed = _qn(tfoot_tds[1].inner_text())
+            total_aud_val = _qn(tfoot_tds[2].inner_text())
+            total_dam_val = _qn(tfoot_tds[3].inner_text())
+            tfoot_timing = _txt(tfoot_tds[4].inner_text())
+            tfoot_prog = _txt(tfoot_tds[5].inner_text())
+            tfoot_status = _txt(tfoot_tds[6].inner_text())
+            tfoot_action = _txt(tfoot_tds[7].inner_text())
+
+            ck.add(group, "Total row label is 'Total'", "total" in tfoot_label.lower(), "Total", tfoot_label)
+
+            sum_completed = sum(r["completed"] for r in parsed_rows)
+            ck.add(group, "Total Completed Inventory = Σ auditor completed inventory",
+                   _near(total_completed, sum_completed), sum_completed, total_completed)
+
+            sum_aud_val = sum(r["audited_val"] for r in parsed_rows)
+            ck.add(group, "Total Audited Value = Σ auditor audited values",
+                   _near(total_aud_val, sum_aud_val, 0.05), round(sum_aud_val, 2), total_aud_val)
+
+            sum_dam_val = sum(r["damaged_val"] for r in parsed_rows)
+            ck.add(group, "Total Damaged Value = Σ auditor damaged values",
+                   _near(total_dam_val, sum_dam_val, 0.05), round(sum_dam_val, 2), total_dam_val)
+
+            placeholders = [tfoot_timing, tfoot_prog, tfoot_status, tfoot_action]
+            all_dashes = all(p in ("--", "-", "") for p in placeholders)
+            ck.add(group, "Total row Elapsed/Progress/Status/Action show '--'",
+                   all_dashes, "-- for all non-additive columns", f"placeholders={placeholders}")
+    else:
+        ck.add(group, "Total row present in tfoot", False, "tfoot with Total row", "MISSING")
+
+    # 7. Search box filter functionality + F9 (Total ignores search filter)
+    if search_input.count() > 0 and len(parsed_rows) >= 2:
+        test_auditor = parsed_rows[0]["name"]
+        try:
+            search_input.fill(test_auditor)
+            _ui_settle(page, 800)
+            filtered_tr = dlg.locator("tbody.p-datatable-tbody > tr").all()
+            exp_cnt = sum(1 for r in parsed_rows if test_auditor.lower() in r["name"].lower())
+            ck.add(group, f"Search box filters rows by auditor name ('{test_auditor}')",
+                   len(filtered_tr) == exp_cnt, f"{exp_cnt} row(s)", f"{len(filtered_tr)} row(s)")
+
+            # Check Spec 01 Finding F9: Total row ignores search filter
+            if tfoot_tr.count() > 0:
+                tfoot_tds = tfoot_tr.locator("td").all()
+                if len(tfoot_tds) >= 2:
+                    current_tfoot_comp = _qn(tfoot_tds[1].inner_text())
+                    sum_all = sum(r["completed"] for r in parsed_rows)
+                    sum_filt = sum(r["completed"] for r in parsed_rows if test_auditor.lower() in r["name"].lower())
+                    if sum_all != sum_filt and _near(current_tfoot_comp, sum_all):
+                        ck.add(group, "Total row ignores search filter (Spec 01 F9)",
+                               False, f"filtered sum {sum_filt}",
+                               f"shows grand total {current_tfoot_comp} (spec 01 F9: Total ignores search filter)",
+                               status="KNOWN", finding="spec 01 F9")
+                    else:
+                        ck.add(group, "Total row reflects search filtered rows",
+                               _near(current_tfoot_comp, sum_filt) or _near(current_tfoot_comp, sum_all),
+                               f"filtered total {sum_filt}", f"{current_tfoot_comp}")
+
+            # Clear search
+            search_input.fill("")
+            search_input.dispatch_event("input")
+            _ui_settle(page, 800)
+            restored_tr = dlg.locator("tbody.p-datatable-tbody > tr").all()
+            ck.add(group, "Clearing search restores all auditor rows",
+                   len(restored_tr) == len(parsed_rows),
+                   f"{len(parsed_rows)} row(s)", f"{len(restored_tr)} row(s)")
+        except Exception as e:
+            ck.error(group, "Auditor Insights search filter test", e)
+
+    # 8. Close dialog
+    try:
+        close_btn.click()
+        dlg.wait_for(state="hidden", timeout=5000)
+        ck.add(group, "Auditor Insights dialog closes cleanly", True, "dialog hidden", "closed")
+    except Exception as e:
+        ck.add(group, "Auditor Insights dialog closes cleanly", False, "dialog hidden", f"close failed: {e}")
 
 
 # ======================================================================
