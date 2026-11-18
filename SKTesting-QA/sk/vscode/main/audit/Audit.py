@@ -38,7 +38,7 @@ class Config:
     company_name = "Test_TuddeCompany_16/10"
     if USE_CUSTOM_LOGIN:
         email    = "tuddefonugu-3882@yopmail.com"
-        password = "12345678"
+        password = "87654321"
     else:
         email    = None
         password = None
