@@ -18,6 +18,7 @@ def step_declaration(page, Config, res, plan, st):
         res.check(area, "Count already finished (resumed run)", True,
                   _clean(page.locator("app-audit-stock-v2 .asv2-status-value").inner_text()))
         st["declared"] = {}
+        _mark_finished(Config, st)
         return
     page.locator(FINISH_BTN).click()
     page.locator(DECLARATION).wait_for(state="visible", timeout=15000)
@@ -56,14 +57,25 @@ def step_declaration(page, Config, res, plan, st):
 
     page.locator(f"{DECLARATION} button.ad-btn--primary", has_text="Finish Audit").click()
     _confirm_swal(page, "finish the audit")
+    _mark_finished(Config, st)                      # finished, even if the reload below is slow
     page.reload()
     page.wait_for_selector("app-audit-stock-v2 header.asv2-toolbar", timeout=30000)
     page.wait_for_timeout(2000)
-    # After Finish Audit the auditor's own status stays IN PROGRESS, with one or two auditors; COMPLETED belongs
-    # only to after Complete Audit, when the audit is In Resolution (user, 2026-11-13). The finished count
-    # shows as the Finish button turning disabled.
+    # After Finish Audit the Stock Audit header's AUDIT STATUS label shows COMPLETED and the Finish button turns
+    # disabled, for every auditor: auditor-only and owner + auditor alike (user, 2026-11-17; replaces the
+    # 2026-11-13 "stays IN PROGRESS" rule). The audit's own status changes only at Complete Audit.
     status = _clean(page.locator("app-audit-stock-v2 .asv2-status-value").inner_text())
     finish_off = page.locator(FINISH_BTN).is_disabled()
-    res.check(area, "Count finished (status IN PROGRESS, Finish disabled)",
-              status.upper() == "IN PROGRESS" and finish_off,
+    res.check(area, "Count finished (status COMPLETED, Finish disabled)",
+              status.upper() == "COMPLETED" and finish_off,
               f"status={status}, Finish {'disabled' if finish_off else 'enabled'}")
+
+
+def _mark_finished(Config, st):
+    """Remember that this auditor (Config.Auditor1 / Auditor2, from st["auditor"] set by FinishFlow) pressed
+    Finish Audit: Audit Summary > Auditor Insights then requires Status Completed + Action Reopen for them."""
+    who = st.get("auditor", "Auditor 1")
+    name = getattr(Config, "Auditor2" if who == "Auditor 2" else "Auditor1", "")
+    done = list(getattr(Config, "finished_auditors", None) or [])
+    if name and name not in done:
+        Config.finished_auditors = done + [name]

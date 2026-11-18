@@ -9,6 +9,10 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_pla
 
 from login.popup_handler import detect_feedback
 from login.logger_setup import mirrored_print
+try:
+    from audit.run_report import record
+except ImportError:                       # run from inside the audit folder
+    from run_report import record
 
 
 # ======================================================
@@ -540,10 +544,14 @@ def A_SA(page, Config):
             else:
                 print(f" [{idx}/{len(items_to_add)}] Failed: {code}")
                 fail_count += 1
+            record(Config, "Count entry", f"[{idx}] {code} @ {location}", success,
+                   f"Audited {audited}, Damaged {damaged} saved", "saved" if success else "add_item_count failed")
 
             page.wait_for_timeout(Config.WAIT_AFTER_ACTION)
 
         print(f"\n📊 Summary: {success_count} succeeded, {fail_count} failed")
+        record(Config, "Count summary", "all Excel rows counted", fail_count == 0,
+               f"{len(items_to_add)} succeeded", f"{success_count} succeeded, {fail_count} failed")
 
         # Feature checks + cross-check: list, Count summary, Finish (declaration), Audit Summary
         if getattr(Config, "run_asv2_checks", False):
@@ -766,10 +774,14 @@ def S_SA(page, Config):
             else:
                 print(f" [{idx}/{len(items_to_add)}] Failed: {code}")
                 fail_count += 1
+            record(Config, "Count entry", f"[{idx}] {code} @ {location}", success,
+                   f"Audited {audited}, Damaged {damaged} saved", "saved" if success else "add_item_count failed")
 
             page.wait_for_timeout(Config.WAIT_AFTER_ACTION)
 
         print(f"\n📊 Summary: {success_count} succeeded, {fail_count} failed")
+        record(Config, "Count summary", "all Excel rows counted", fail_count == 0,
+               f"{len(items_to_add)} succeeded", f"{success_count} succeeded, {fail_count} failed")
 
     # --------------------------------------------------------------
     # ENTRY POINT

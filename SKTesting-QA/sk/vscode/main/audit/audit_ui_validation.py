@@ -13,6 +13,10 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
+try:
+    from audit.run_report import record
+except ImportError:                       # run from inside the audit folder
+    from run_report import record
 
 log = logging.getLogger(__name__)
 
@@ -981,6 +985,12 @@ def _run_validation(page: Page, Config) -> None:
 
     try:
         ui_report, mapping_report = run_full_validation(page, Config)
+        for r in ui_report.results:
+            _record_result(Config, "Post-save UI", r)
+        if mapping_report.mapping_type_result:
+            _record_result(Config, "User mapping", mapping_report.mapping_type_result)
+        for r in mapping_report.user_results:
+            _record_result(Config, "User mapping", r)
 
         overall = (
             "PASS"
@@ -1006,8 +1016,19 @@ def _run_validation(page: Page, Config) -> None:
                 if r.extra:
                     log.warning(f"       Extra   : {sorted(r.extra)}")
 
-    except:
+    except Exception as e:
         log.error(f" UI Validation error: ", exc_info=True)
+        record(Config, "Post-save UI", "validation ran", False, "runs without an error",
+               f"error: {str(e).splitlines()[0][:200] if str(e) else type(e).__name__}", status="ERROR")
+
+
+def _record_result(Config, group, r: ValidationResult) -> None:
+    """One ValidationResult as a run-report row (missing / extra items in Finding)."""
+    finding = "; ".join(x for x in (f"Missing: {sorted(r.missing)}" if r.missing else "",
+                                    f"Extra: {sorted(r.extra)}" if r.extra else "", r.note) if x)
+    record(Config, group, r.field, r.passed, _fmt(r.expected), _fmt(r.actual), finding=finding)
+
+
 def validate_audit_list_row(page: Page, Config) -> ValidationResult:
     log.info(f"VALIDATING AUDIT LIST ROW: '{Config.ap_audit_name}'")
 
@@ -1052,6 +1073,7 @@ def validate_audit_list_row(page: Page, Config) -> ValidationResult:
     for field_name, expected, actual in checks:
         passed = _norm(str(expected)) == _norm(str(actual))
         log.info(f"[{'PASS' if passed else 'FAIL'}] {field_name} | Expected: {expected} | Actual: {actual}")
+        record(Config, "Audit list row", field_name, passed, expected, actual)
         if not passed:
             all_passed = False
 

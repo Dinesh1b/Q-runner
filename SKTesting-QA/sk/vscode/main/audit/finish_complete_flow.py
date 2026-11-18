@@ -83,6 +83,7 @@ class FinishFlow:
         """Stock audit > Finish audit > Audit Declaration as the logged-in auditor (notes from finish_flow).
         The declarations of both auditors are kept together for step 7's carry-over check."""
         declaration, declared = dict(self.st.get("declaration", {})), dict(self.st.get("declared", {}))
+        self.st["auditor"] = who        # step_declaration records who finished (Config.finished_auditors)
         self.res.section(f"Declaration ({who})", step_declaration, page, Config, self.res, self.plan, self.st)
         self.st["declaration"] = {**declaration, **self.st.get("declaration", {})}
         self.st["declared"] = {**declared, **self.st.get("declared", {})}

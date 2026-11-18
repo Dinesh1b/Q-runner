@@ -20,6 +20,7 @@ import pandas as pd
 from audit.Auditor_1 import ASV2_ADD_COUNT_BTN, ASV2_AUDITED_QTY, ASV2_DAMAGED_QTY, ASV2_ITEM_LOADED, ASV2_ITEM_SEARCH
 from audit.finish_complete_flow import _close_guide, _open_audit
 from audit.stock_audit_checks import _clean, _num
+from audit.run_report import attach_file, run_files, save_to_run_report
 
 DAYS     = "app-layout input[formcontrolname='autoCompletionDays']"
 AUDITORS = "app-layout p-multiselect[formcontrolname='auditor']"
@@ -266,8 +267,8 @@ def import_good_sheet(page, Config):
 # TEST CASE RUNNER
 # ======================================================
 class SettingsRun:
-    def __init__(self, page, folder):
-        self.page, self.folder = page, folder
+    def __init__(self, page, folder, prefix=""):
+        self.page, self.folder, self.prefix = page, folder, prefix
         self.cases = []
 
     after = None    # run after every case (puts the original settings back)
@@ -293,7 +294,7 @@ class SettingsRun:
         except Exception as e:
             actual = f"error: {str(e).splitlines()[0][:200]}"
         if status == "FAIL":
-            shot = os.path.join(self.folder, f"{tc_id}.png")
+            shot = os.path.join(self.folder, f"{self.prefix}{tc_id}.png")
             try:
                 self.page.screenshot(path=shot, full_page=True)
             except Exception:
@@ -601,7 +602,30 @@ def write_report(run, folder, audit_name, Config, label="AUDIT SETTINGS TESTS", 
                  impact="Audit settings can be saved wrong or not applied to counting.",
                  fix="Check the settings validation, save API and how the setting is applied.",
                  severity=_settings_severity):
-    """Test Cases + Bugs workbook in folder; the keyword arguments let other test suites reuse it."""
+    """The test cases into the Audit.py run workbook (its "Settings Tests" sheet); run on its own, a Test Cases +
+    Bugs workbook in folder. The keyword arguments let other test suites reuse it."""
+    path = save_to_run_report(Config, [
+        {"Group": c["Group"], "Check": f"{c['Test Case ID']} {c['Title']}",
+         "Expected": c["Expected Result"], "Actual": c["Actual Result"],
+         "Status": c["Status"] if c["Status"] in ("PASS", "FAIL", "NOT RUN") else "NOT RUN",
+         "Finding": "; ".join(x for x in ("" if c["Status"] in ("PASS", "FAIL", "NOT RUN") else c["Status"],
+                                          f"Steps: {c['Steps']}") if x),
+         "Screenshot": c["Attachment"]} for c in run.cases])
+    if path is None:
+        path = _write_cases_workbook(run, folder, audit_name, Config, file_prefix, sub_module, preconditions,
+                                     impact, fix, severity)
+    fails = [c for c in run.cases if c["Status"] == "FAIL"]
+    counts = {s: sum(1 for c in run.cases if c["Status"] == s) for s in ("PASS", "FAIL", "NOT RUN", "BLOCKED", "MANUAL")}
+    print("\n" + "=" * 70 + f"\n  {label} — {audit_name}\n" + "=" * 70)
+    for c in run.cases:
+        print(f"  {c['Test Case ID']:<11} {c['Status']:<8} {c['Title']}")
+    print(f"  {counts}   bugs: {len(fails)}   report: {path}")
+    return counts["FAIL"] == 0, path
+
+
+def _write_cases_workbook(run, folder, audit_name, Config, file_prefix, sub_module, preconditions, impact, fix,
+                          severity) -> str:
+    """Test Cases + Bugs workbook in folder (when there is no Audit.py run report)."""
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Font, PatternFill
     fills = {"PASS": "C6EFCE", "FAIL": "FFC7CE", "NOT RUN": "D9D9D9", "BLOCKED": "D9D9D9", "MANUAL": "FFEB9C"}
@@ -635,12 +659,7 @@ def write_report(run, folder, audit_name, Config, label="AUDIT SETTINGS TESTS", 
                 c.alignment = Alignment(wrap_text=True, vertical="top")
     path = os.path.join(folder, f"{file_prefix}_{os.path.basename(folder)}.xlsx")
     wb.save(path)
-    counts = {s: sum(1 for c in run.cases if c["Status"] == s) for s in ("PASS", "FAIL", "NOT RUN", "BLOCKED", "MANUAL")}
-    print("\n" + "=" * 70 + f"\n  {label} — {audit_name}\n" + "=" * 70)
-    for c in run.cases:
-        print(f"  {c['Test Case ID']:<11} {c['Status']:<8} {c['Title']}")
-    print(f"  {counts}   bugs: {len(fails)}   report: {path}")
-    return counts["FAIL"] == 0, path
+    return path
 
 
 # ======================================================
@@ -648,16 +667,17 @@ def write_report(run, folder, audit_name, Config, label="AUDIT SETTINGS TESTS", 
 # ======================================================
 def run_settings_tests(page, Config) -> bool:
     audit = Config.settings_audit_name
-    folder = os.path.join(Config.e2e_output_dir, f"Settings_{datetime.now():%m%d_%H%M}")
+    folder, prefix = run_files(Config, "Settings")      # in an Audit.py run: the run folder, files "Settings_..."
     os.makedirs(folder, exist_ok=True)
-    bad_file = os.path.join(folder, "stock_bad.xlsx")
+    bad_file = os.path.join(folder, f"{prefix}stock_bad.xlsx")
     pd.DataFrame({"Item Code": ["ITM0001", "ITM0002", "ITM0002", "ITM0003", "NOPE9999"],
                   "Location": ["SA-A1-B1-L1", "SA-A1-B1-L2", "SA-A1-B1-L2", "SA-A2-B3-L3", "SA-A1-B1-L1"],
                   "Adjustmentqty": [10, 10, 10, "abc", 5]}).to_excel(bad_file, sheet_name="Data", index=False)
+    attach_file(Config, bad_file)                        # in an Audit.py run: a sheet of the run workbook
 
     saved_name = Config.ap_audit_name
     Config.ap_audit_name = audit
-    run = SettingsRun(page, folder)
+    run = SettingsRun(page, folder, prefix)
     original = None
     st = {}
     other = getattr(Config, "settings_second_auditor", "Dinesh")

@@ -46,6 +46,10 @@ from typing import Dict, List, Optional, Tuple
 
 import openpyxl
 from playwright.sync_api import Page
+try:
+    from audit.run_report import record_rows
+except ImportError:                       # run from inside the audit folder
+    from run_report import record_rows
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -690,10 +694,24 @@ def select_branch(page: Page, branch_text: str):
 
 
 def select_navigation_option(page: Page, option_name: str):
-    page.wait_for_selector("div[role='dialog'][aria-labelledby='auditNavTitle']")
-    card = page.locator(f"button.create-type-card:has(h6.create-type-card__title:text-is('{option_name}'))")
+    """
+    option_name: one of 'Stock Audit', 'Audit Summary', 'Settings'
+    """
+    dialog = page.locator("div[role='dialog'][aria-labelledby='auditNavTitle']")
+    try:
+        dialog.first.wait_for(state="visible", timeout=15000)
+    except Exception:
+        # A user who is only an auditor (not the owner) goes straight to the Stock Audit page: no choice dialog
+        landed = {"Stock Audit": "/stock", "Audit Summary": "/auditSummary"}.get(option_name)
+        if landed and landed in page.url:
+            print(f"   No choice dialog: {option_name} opened directly")
+            return
+        raise
+
+    card = page.locator(
+        f"button.create-type-card:has(h6.create-type-card__title:text-is('{option_name}'))"
+    )
     card.click()
-    page.locator("button.create-type-btn--primary:has-text('Continue')").click()
 
 
 def click_audit(page: Page, ap_audit_name: str):
@@ -741,5 +759,23 @@ def A_Recently_Audit(page: Page, Config) -> FormulaValidationReport:
     # 4. Run formula & business rule validation
     report = validate_recently_audited_by_rules(page, stock_data)
     report.print_report()
+    record_rows(Config, report_rows(report))
 
     return report
+
+
+_RUN_STATUS = {ValidationStatus.PASSED: "PASS", ValidationStatus.FAILED: "FAIL",
+               ValidationStatus.WARNING: "WARN", ValidationStatus.SKIPPED: "NOT RUN"}
+
+
+def report_rows(report: FormulaValidationReport) -> List[Dict[str, str]]:
+    """The checks of the report as run-report rows (Group / Check / Expected / Actual / Status / Finding)."""
+    def row(group, chk):
+        return {"Group": group, "Check": f"{chk.rule_id} {chk.description}", "Expected": chk.expected_value,
+                "Actual": chk.actual_value, "Status": _RUN_STATUS.get(chk.status, str(chk.status)),
+                "Finding": chk.error_message or ""}
+    rows = [row("Page", c) for c in report.page_checks]
+    rows += [row("Form", c) for c in report.form_checks]
+    for r in report.row_checks:
+        rows += [row(f"Row {r.row_number} {r.item_code}", c) for c in r.checks]
+    return rows

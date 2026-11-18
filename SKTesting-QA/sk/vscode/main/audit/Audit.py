@@ -23,6 +23,8 @@ from A_audit_Summary import A_audit_Summary
 from A_Recently_audit import A_Recently_Audit
 from audit.finish_complete_flow import FinishFlow
 from audit.settings_tests import run_settings_tests
+from audit.stock_audit_checks import Results
+from audit.run_report import RunReport
 
 
 # ======================================================
@@ -46,17 +48,17 @@ class Config:
 
     browsername  = "chrome"
     environments = "production"   # production, staging, development
-    Branch       = "DE"
+    Branch       = "CH"
 
     # ── Audit Creation ────────────────────────────────────
     Audit_Owner   = "Test_Tudde"
     Auditor1      = "Test_Tudde"
     Auditor2      = "Vigellup B"          # user of email2
-    Group_Name    = "QA_GRP_1112_2214"   # created by inventory/Inventory.py
+    Group_Name    = "QA_GRP_1112_2210"   # created by inventory/Inventory.py
     Audit_mode    = "Ad_hoc"             # "Ad_hoc" or "Audit_plan"
     Audit_Type    = "Complete Audit"     # Complete Count | Cycle Count | Complete Audit | Partial Audit | Investigation Audit
     SD_audit_type = "Dynamic"           # "Static" or "Dynamic"
-    ap_audit_name = "QA_SUM_1113_21"
+    ap_audit_name = "QA_SUM_1364_42"
     frequency     = "daily"             # "daily" | "weekly" | "monthly" | "manual"
     Day_s         = 30
     Target__Day   = "Thursday"
@@ -71,7 +73,7 @@ class Config:
     CROSS_Auditor_name = "Dinesh"
 
     AUDIT_MAPPING_TYPE          = "Random"           # "Random" | "By Category" | "By Storage"
-    EXCEL_PATH                  = r"C:\Users\dines\3D Objects\main_qexcel.xlsx"
+    EXCEL_PATH                  = r"C:\Users\HP\Videos\main_qexcel.xlsx"
     EXCEL_SHEET_AUDITOR_MAPPING = "AUDITOR_MAPPING"
     EXCEL_auditor_col           = "Auditor"
     EXCEL_category_col          = "Category"
@@ -93,8 +95,8 @@ class Config:
     run_create_audit        = False
     run_update_audit        = False
     run_ui_validation       = False
-    run_create_Ad_hoc_Audit = False
-    run_setup_Audit         = False
+    run_create_Ad_hoc_Audit = True
+    run_setup_Audit         = True
 
     # ── Auditor 1 Stock Count ─────────────────────────────
     run_new_add_item = False
@@ -115,7 +117,7 @@ class Config:
     EXCEL_AUDITED_COL1    = "audited"
     EXCEL_DAMAGED_COL1    = "damaged"
 
-    run_stock_audit  = False
+    run_stock_audit  = True
     run_asv2_checks  = True    # after the counts: test page features + cross-check list / Count summary / Finish / Audit Summary
 
     # ── Auditor 2 Stock Count ─────────────────────────────
@@ -137,7 +139,7 @@ class Config:
     EXCEL_AUDITED_COL2    = "audited"
     EXCEL_DAMAGED_COL2    = "damaged"
 
-    run_stock_audit2 = False
+    run_stock_audit2 = True
 
     # ── Finish → Complete (Steps 5–10) ────────────────────
     fc_auditor      = "Dinesh B"                   # recount assignee (Step 8)
@@ -145,23 +147,28 @@ class Config:
     fc_closure_note = "QA automated finish/complete run"
     EXCEL_SHEET_finish_flow = "finish_flow"
 
-    run_finish_audit1      = False   # Step 5:  Auditor 1 → Finish audit > Audit Declaration
-    run_finish_audit2      = False   # Step 6:  Auditor 2 → Finish audit > Audit Declaration
-    run_complete_audit     = False   # Step 7:  Audit Summary > Complete Audit (3-step popup)
-    run_resolution_actions = False   # Step 8:  Accept | Recount | Investigate per finish_flow
-    run_recount            = False   # Step 9:  Recount sub-audit > review > approve
-    run_resolution_summary = False   # Step 10: Resolution summary > Adjustment > Complete > Audit History
+    run_finish_audit1      = True   # Step 5:  Auditor 1 → Finish audit > Audit Declaration
+    run_finish_audit2      = True   # Step 6:  Auditor 2 → Finish audit > Audit Declaration
+    run_complete_audit     = True   # Step 7:  Audit Summary > Complete Audit (3-step popup)
+    run_resolution_actions = True   # Step 8:  Accept | Recount | Investigate per finish_flow
+    run_recount            = True   # Step 9:  Recount sub-audit > review > approve
+    run_resolution_summary = True   # Step 10: Resolution summary > Adjustment > Complete > Audit History
 
     # ── Audit Summary & Reports ───────────────────────────
-    EXCEL_SHEET_as_table       = "as_table"
+
     
     summary_ui_validation      = True    # UI validation: fields, formulas, charts & live Excel export
-    e2e_output_dir             = r"C:\Users\dines\3D Objects\QA_E2E"
+    # Every run writes e2e_output_dir\Audit_Run_<audit>_<MMDD_HHMM>\Audit_Run_<audit>_<MMDD_HHMM>.xlsx
+    # = the only report Excel: Overview + one sheet per step (Audit Summary, Audit History, Settings Tests, ...) + Bugs.
+    # Screenshots go into its "Screenshots" sheet (linked from each check) and the settings test file into a
+    # sheet; then they are removed. The app's downloads (Export Excel, PDFs) stay separate files next to the
+    # workbook (listed with links in Overview). No subfolders.
+    e2e_output_dir             = r"C:\Users\HP\Videos\audit_summary_reports"
 
-    run_A_SA_table              = False
-    run_A_audit_Summary         = False
+  
+    run_A_audit_Summary         = True
     run_A_audit_Summary_history = True   # Post-completion: Audit History validation (UI + Excel + PDF)
-    run_A_Recently_Audit        = False
+    run_A_Recently_Audit        = True
 
     # ── Audit Settings Tests ──────────────────────────────
     settings_audit_name    = "QA_FC_1102_1907"
@@ -176,154 +183,159 @@ class Config:
 
 if __name__ == "__main__":
     with sync_playwright() as p:
+        run = RunReport(Config)          # run folder + Audit_Run_<audit>_<time>.xlsx, one sheet per step
+        browser = None
 
-        browser, page = login(
-            p,
-            browser_name=Config.browsername,
-            environment=Config.environments,
-            email=Config.email,
-            password=Config.password,
-            company_name=Config.company_name,
-        )
-
-        # ── Audit Creation ────────────────────────────────
-        if Config.Audit_mode == "Ad_hoc":
-            if Config.run_create_Ad_hoc_Audit:
-                Ad_hoc_Audit(page, Config)
-            else:
-                print("x create_Ad_hoc_Audit")
-        elif Config.Audit_mode == "Audit_plan":
-            if Config.run_timezone and Config.frequency.lower() != "manual":
-                timezone(page)
-            else:
-                print("x timezone")
-            if Config.run_create_audit:
-                create_audit(page, Config)
-            else:
-                print("x create_audit")
-            if Config.run_update_audit:
-                update_audit(page, Config)
-            else:
-                print("x update_audit")
-        else:
-            print(f"x Invalid Audit_mode: {Config.Audit_mode}")
-
-        if Config.run_setup_Audit:
-            Ongo_Audit(page, Config)
-        else:
-            print("x setup_Audit")
-
-        # ── Auditor 1 Stock Count ─────────────────────────
-        if Config.run_stock_audit:
-            stock_audit(page, Config)
-        else:
-            print("x stock_audit")
-
-        # Steps 5–10 share state in one FinishFlow object
-        finish_steps = ("run_finish_audit1", "run_finish_audit2", "run_complete_audit",
-                        "run_resolution_actions", "run_recount", "run_resolution_summary")
-        flow = FinishFlow(Config) if any(getattr(Config, f, False) for f in finish_steps) else None
-
-        # ── Step 5: Auditor 1 → Finish > Audit Declaration ─
-        if Config.run_finish_audit1:
-            flow.finish_audit(page, Config, "Auditor 1")
-        else:
-            print("x Step 5 finish_audit (Auditor 1)")
-
-        # ── Auditor 2 Stock Count ─────────────────────────
-        switched = False
-        if Config.run_stock_audit2:
-            same_creds = (
-                (Config.email or "") == (Config.email2 or "") and
-                (Config.password or "") == (Config.password2 or "")
-            )
-            if not same_creds:
-                browser.close()
-                browser, page = login(
-                    p,
-                    browser_name=Config.browsername,
-                    environment=Config.environments,
-                    email=Config.email2,
-                    password=Config.password2,
-                    company_name=Config.company_name,
-                )
-                page.set_default_timeout(30000)
-                switched = True
-
-            stock_audit2(page, Config)
-
-            # ── Step 6: Auditor 2 → Finish > Audit Declaration
-            if Config.run_finish_audit2:
-                flow.finish_audit(page, Config, "Auditor 2")
-            else:
-                print("x Step 6 finish_audit (Auditor 2)")
-        else:
-            print("x stock_audit2")
-            if Config.run_finish_audit2:
-                print("x Step 6 finish_audit (Auditor 2): run_stock_audit2 is False")
-
-        # ── Back to Auditor 1 login for Steps 7–10 ───────
-        if switched:
-            browser.close()
-            browser, page = login(
+        def do_login(email, password):
+            return login(
                 p,
                 browser_name=Config.browsername,
                 environment=Config.environments,
-                email=Config.email,
-                password=Config.password,
+                email=email,
+                password=password,
                 company_name=Config.company_name,
             )
 
-        # ── Audit Summary & Reports ───────────────────────
+        try:
+            browser, page = run.step("Login", do_login, Config.email, Config.password, label="Auditor 1 login")
 
-        if Config.run_A_audit_Summary:
-            A_audit_Summary(page, Config)
-        else:
-            print("x A_audit_Summary")
+            # ── Audit Creation ────────────────────────────────
+            if Config.Audit_mode == "Ad_hoc":
+                if Config.run_create_Ad_hoc_Audit:
+                    run.step("Create Audit", Ad_hoc_Audit, page, Config)
+                else:
+                    run.skip("Create Audit", "run_create_Ad_hoc_Audit = False")
+            elif Config.Audit_mode == "Audit_plan":
+                if Config.run_timezone and Config.frequency.lower() != "manual":
+                    run.step("Timezone", timezone, page)
+                else:
+                    run.skip("Timezone", "run_timezone = False or frequency = manual")
+                if Config.run_create_audit:
+                    run.step("Create Audit", create_audit, page, Config)
+                else:
+                    run.skip("Create Audit", "run_create_audit = False")
+                if Config.run_update_audit:
+                    run.step("Update Audit Plan", update_audit, page, Config)
+                else:
+                    run.skip("Update Audit Plan", "run_update_audit = False")
+            else:
+                run.skip("Create Audit", f"Invalid Audit_mode: {Config.Audit_mode}")
 
-        if Config.run_A_Recently_Audit:
-            A_Recently_Audit(page, Config)
-        else:
-            print("x A_Recently_Audit")
+            if Config.run_setup_Audit:
+                run.step("Setup Audit", Ongo_Audit, page, Config)
+            else:
+                run.skip("Setup Audit", "run_setup_Audit = False")
 
-        # ── Step 7: Complete Audit (3-step popup) ─────────
-        if Config.run_complete_audit:
-            flow.complete_audit(page, Config)
-        else:
-            print("x Step 7 complete_audit")
+            # ── Auditor 1 Stock Count ─────────────────────────
+            if Config.run_stock_audit:
+                Config.asv2_results = Results()      # run_stock_audit_checks adds its checks here
+                run.step("Stock Audit A1", stock_audit, page, Config, results=Config.asv2_results)
+            else:
+                run.skip("Stock Audit A1", "run_stock_audit = False")
 
-        # ── Step 8: Resolution actions ────────────────────
-        if Config.run_resolution_actions:
-            flow.resolution_actions(page, Config)
-        else:
-            print("x Step 8 resolution_actions")
+            # Steps 5–10 share state in one FinishFlow object
+            finish_steps = ("run_finish_audit1", "run_finish_audit2", "run_complete_audit",
+                            "run_resolution_actions", "run_recount", "run_resolution_summary")
+            flow = FinishFlow(Config) if any(getattr(Config, f, False) for f in finish_steps) else None
 
-        # ── Step 9: Recount sub-audit ─────────────────────
-        if Config.run_recount:
-            flow.recount(page, Config)
-        else:
-            print("x Step 9 recount")
+            # ── Step 5: Auditor 1 → Finish > Audit Declaration ─
+            if Config.run_finish_audit1:
+                run.step("Declaration A1", flow.finish_audit, page, Config, "Auditor 1", results=flow.res)
+            else:
+                run.skip("Declaration A1", "run_finish_audit1 = False")
 
-        # ── Step 10: Resolution summary → Audit History ───
-        if Config.run_resolution_summary:
-            flow.resolution_summary(page, Config)
-        else:
-            print("x Step 10 resolution_summary")
+            # ── Auditor 2 Stock Count ─────────────────────────
+            switched = False
+            if Config.run_stock_audit2:
+                same_creds = (
+                    (Config.email or "") == (Config.email2 or "") and
+                    (Config.password or "") == (Config.password2 or "")
+                )
+                if not same_creds:
+                    browser.close()
+                    browser, page = run.step("Login", do_login, Config.email2, Config.password2,
+                                             label="Auditor 2 login")
+                    page.set_default_timeout(30000)
+                    switched = True
 
-        if flow:
-            flow.report(Config)
+                Config.asv2_results = Results()
+                run.step("Stock Audit A2", stock_audit2, page, Config, results=Config.asv2_results)
 
-        # ── Post-Completion: History Validation (UI + Excel + PDF)
-        if getattr(Config, "run_A_audit_Summary_history", False):
-            print("\n" + "=" * 70)
-            print(" AUDIT HISTORY POST-COMPLETION VALIDATION (UI + Excel + PDF)")
-            print("=" * 70)
-            A_audit_Summary(page, Config, is_history=True)
+                # ── Step 6: Auditor 2 → Finish > Audit Declaration
+                if Config.run_finish_audit2:
+                    run.step("Declaration A2", flow.finish_audit, page, Config, "Auditor 2", results=flow.res)
+                else:
+                    run.skip("Declaration A2", "run_finish_audit2 = False")
+            else:
+                run.skip("Stock Audit A2", "run_stock_audit2 = False")
+                if Config.run_finish_audit2:
+                    run.skip("Declaration A2", "run_stock_audit2 is False")
 
-        # ── Audit Settings Tests ──────────────────────────
-        if Config.run_settings_tests:
-            run_settings_tests(page, Config)
-        else:
-            print("x settings_tests")
+            # ── Back to Auditor 1 login for Steps 7–10 ───────
+            if switched:
+                browser.close()
+                browser, page = run.step("Login", do_login, Config.email, Config.password,
+                                         label="Auditor 1 login (back)")
 
-        browser.close()
+            # ── Audit Summary & Reports ───────────────────────
+            if Config.run_A_audit_Summary:
+                run.step("Audit Summary", A_audit_Summary, page, Config)
+            else:
+                run.skip("Audit Summary", "run_A_audit_Summary = False")
+
+            if Config.run_A_Recently_Audit:
+                run.step("Recently Audited", A_Recently_Audit, page, Config)
+            else:
+                run.skip("Recently Audited", "run_A_Recently_Audit = False")
+
+            # ── Step 7: Complete Audit (3-step popup) ─────────
+            if Config.run_complete_audit:
+                run.step("Complete Audit", flow.complete_audit, page, Config, results=flow.res)
+            else:
+                run.skip("Complete Audit", "run_complete_audit = False")
+
+            # ── Step 8: Resolution actions ────────────────────
+            if Config.run_resolution_actions:
+                run.step("Resolution Actions", flow.resolution_actions, page, Config, results=flow.res)
+            else:
+                run.skip("Resolution Actions", "run_resolution_actions = False")
+
+            # ── Step 9: Recount sub-audit ─────────────────────
+            if not Config.run_recount:
+                run.skip("Recount", "run_recount = False")
+            elif "Recount" not in flow.st.get("actions", {}).values():
+                run.skip("Recount", "no Recount action in step 8")
+            else:
+                run.step("Recount", flow.recount, page, Config, results=flow.res)
+
+            # ── Step 10: Resolution summary → Audit History ───
+            if Config.run_resolution_summary:
+                run.step("Resolution Summary", flow.resolution_summary, page, Config, results=flow.res)
+            else:
+                run.skip("Resolution Summary", "run_resolution_summary = False")
+
+            if flow:
+                flow.report(Config)
+
+            # ── Post-Completion: History Validation (UI + Excel + PDF)
+            if getattr(Config, "run_A_audit_Summary_history", False):
+                print("\n" + "=" * 70)
+                print(" AUDIT HISTORY POST-COMPLETION VALIDATION (UI + Excel + PDF)")
+                print("=" * 70)
+                run.step("Audit History", A_audit_Summary, page, Config, True)
+            else:
+                run.skip("Audit History", "run_A_audit_Summary_history = False")
+
+            # ── Audit Settings Tests ──────────────────────────
+            if Config.run_settings_tests:
+                run.step("Settings Tests", run_settings_tests, page, Config)
+            else:
+                run.skip("Settings Tests", "run_settings_tests = False")
+
+        finally:
+            run.write()
+            try:
+                if browser is not None:
+                    browser.close()
+            except Exception:
+                pass                     # already closed (e.g. a re-login failed)

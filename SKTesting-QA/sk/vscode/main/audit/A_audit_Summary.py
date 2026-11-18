@@ -32,6 +32,10 @@ from dataclasses import dataclass
 from enum import Enum
 import pandas as pd
 from playwright.sync_api import sync_playwright, Page
+try:
+    from audit.run_report import run_files, save_to_run_report
+except ImportError:                       # run from inside the audit folder
+    from run_report import run_files, save_to_run_report
 
 
 # ── filter enums ─────────────────────────────────────────────────────
@@ -672,7 +676,7 @@ def A_audit_Summary(page, config, is_history: bool = False):
     - Post-complete (Audit History): validates Completed status, read-only controls, PDF download & Excel export.
     Read-only: never modifies the audit."""
     if getattr(config, "summary_ui_validation", True):
-        return validate_summary_ui(page, config)
+        return validate_summary_ui(page, config, label="History" if is_history else "UI")
     return True
 
 
@@ -871,6 +875,14 @@ AUDITOR_PROGRESS_FORMULA = ("min(100, (counted_rows / assigned_rows * 25 if assi
                             " + (completed / assigned_stock * 75 if assigned_stock else 0))")
 AUDITOR_STATUS_RULE = ("status in ('In Progress', 'Completed') if counted_rows > 0"
                        " else status in ('Yet to Start', 'Completed', 'Unknown')")   # Completed: the auditor finished
+# An auditor who pressed Finish Audit (Config.finished_auditors) must show Status Completed + Action Reopen
+# (user, 2026-11-17); AUDITOR_STATUS_RULE is only for auditors not known to have finished.
+
+
+def _auditor_finished(label, finished) -> bool:
+    """Auditor Insights row name (full name, may be cut at 20 chars) is one of the finished auditors' names."""
+    n = _txt(label).lower().rstrip(".… ")
+    return bool(n) and any(f == n or (len(n) >= 15 and f.startswith(n)) for f in finished)
 # Per-auditor progress inputs come from the dialog's API response (returned, not shown; spec 01 §4):
 # counted_rows = AuditedCount, assigned_stock = AssignedInventoryCount, assigned_rows = the on-sheet rows the
 # auditor counted + RemainingCount (the assigned rows the auditor has not counted).
@@ -1432,11 +1444,11 @@ def _ui_charts(page):
     return out
 
 
-def _ui_export(page, folder):
+def _ui_export(page, folder, prefix=""):
     """Download Export; {sheet: rows under its ItemCode header row} and the file path."""
     with page.expect_download(timeout=60000) as info:
         page.locator(f"{UI_SUMMARY} button.warning-button", has_text="Export").first.click()
-    path = os.path.join(folder, info.value.suggested_filename or "Audit Summary Report.xlsx")
+    path = os.path.join(folder, prefix + (info.value.suggested_filename or "Audit Summary Report.xlsx"))
     info.value.save_as(path)
     sheets = OrderedDict()
     for name, raw in pd.read_excel(path, header=None, dtype=str, sheet_name=None).items():
@@ -1549,14 +1561,14 @@ def _ui_close_menu(page):
 # results and report
 # ----------------------------------------------------------------------
 class _UIChecks:
-    def __init__(self, page, folder):
-        self.page, self.folder, self.rows = page, folder, []
+    def __init__(self, page, folder, prefix=""):
+        self.page, self.folder, self.prefix, self.rows = page, folder, prefix, []
 
     def add(self, group, check, ok, expected, actual, status=None, finding=""):
         status = status or ("PASS" if ok else "FAIL")
         shot = ""
         if status == "FAIL" and sum(r["Status"] == "FAIL" for r in self.rows) < 40:
-            shot = os.path.join(self.folder, f"FAIL_{len(self.rows) + 1:03d}_{_key(check)[:30]}.png")
+            shot = os.path.join(self.folder, f"{self.prefix}FAIL_{len(self.rows) + 1:03d}_{_key(check)[:30]}.png")
             try:
                 self.page.screenshot(path=shot, full_page=True)
             except Exception:
@@ -2383,6 +2395,8 @@ def _check_auditor_insights(ck, st, page, button):
     tiles = st.get("tiles") or {}
     random_map = _key(tiles.get(_find("Mapping Type", list(tiles)) or "", "")) == "random"
     uncounted = [v for v in map(_row_vals, st["rows"]) if _calc(RANDOM_UNCOUNTED, **v)]
+    # auditors who pressed Finish Audit in this Audit.py run (audit/finish_audit.py records them)
+    finished = [_txt(n).lower() for n in (getattr(st.get("config"), "finished_auditors", None) or [])]
     for i, r in enumerate(parsed_rows):
         aud_label = r["name"]
         e = exp_aud[aud_label]
@@ -2450,10 +2464,15 @@ def _check_auditor_insights(ck, st, page, button):
                    f"{e['on_sheet_counted']} + RemainingCount {remaining:g} = {e['on_sheet_counted'] + remaining:g}")
 
         timing_ok = bool(re.match(r"^\d{2,}:\d{2}$", r["timing"]))
-        status_ok = bool(_calc(AUDITOR_STATUS_RULE, counted_rows=e["counted_rows"], status=r["status"]))
-        want_st = "In Progress / Completed" if e["counted_rows"] > 0 else "Yet to Start / Completed / Unknown"
-        ck.add(group, f"Auditor '{aud_label}' | Status & Elapsed Timing", timing_ok and status_ok,
-               f"formula: counted_rows = {e['counted_rows']} → Status {want_st}; Timing HH:mm",
+        if _auditor_finished(aud_label, finished):
+            # the auditor pressed Finish Audit in this run (user, 2026-11-17): Completed + Reopen, owner or not
+            status_ok = r["status"].lower() == "completed" and r["action"].lower() == "reopen"
+            exp_st = "auditor pressed Finish Audit → Status Completed, Action Reopen; Timing HH:mm"
+        else:
+            status_ok = bool(_calc(AUDITOR_STATUS_RULE, counted_rows=e["counted_rows"], status=r["status"]))
+            want_st = "In Progress / Completed" if e["counted_rows"] > 0 else "Yet to Start / Completed / Unknown"
+            exp_st = f"formula: counted_rows = {e['counted_rows']} → Status {want_st}; Timing HH:mm"
+        ck.add(group, f"Auditor '{aud_label}' | Status & Elapsed Timing", timing_ok and status_ok, exp_st,
                f"Status: {r['status']}, Timing: {r['timing']}, Action: {r['action']}")
 
     if api_rows and random_map and parsed_rows:          # Random: every stock row's stock assigned once
@@ -2948,7 +2967,7 @@ def _check_pdf(ck, st, page, label, pools):
     for where, click in sources:
         with page.expect_download(timeout=90000) as info:
             click()
-        path = os.path.join(ck.folder, f"Audit_Summary_{_key(where)}.pdf")
+        path = os.path.join(ck.folder, f"{ck.prefix}Audit_Summary_{_key(where)}.pdf")
         info.value.save_as(path)
         data = open(path, "rb").read()
         pages = _pdf_pages(path, data)
@@ -2995,7 +3014,7 @@ def _exp_equal(kind, field, ev, uv):
     if kind in ("num", "money"):
         return _close(_qn(ev), _qn(uv), EXPORT_TOL[kind])
     if kind == "date":
-        if _blank(ev) and _blank(uv):
+        if not _blank(ev) and not _blank(uv):          # both empty (e.g. an item not audited): equal
             return True
         a, b = _parse_date(ev, EXPORT_DATE_FORMAT), _parse_date(uv, DATE_FORMATS["Audited Date"])
         return bool(a and b and a.date() == b.date())
@@ -3216,11 +3235,10 @@ def check_move_to_not_found(page, config, folder=None) -> bool:
     if choice not in UNVERIFIED_CHOICE_RULES:
         raise ValueError(f"complete_choice {choice!r} is not one of {list(UNVERIFIED_CHOICE_RULES)}")
     chip_rules, row_rules = UNVERIFIED_CHOICE_RULES[choice]
-    folder = folder or os.path.join(getattr(config, "e2e_output_dir", os.getcwd()),
-                                    f"Summary_{_key(choice)}_{audit}_{datetime.now():%m%d_%H%M}")
+    folder, prefix = (folder, "") if folder else run_files(config, f"Summary_{_key(choice)}")
     os.makedirs(folder, exist_ok=True)
     section(f"UNVERIFIED ITEMS: {choice.upper()}  >  {audit}")
-    group, ck = f"Unverified step: {choice}", _UIChecks(page, folder)
+    group, ck = f"Unverified step: {choice}", _UIChecks(page, folder, prefix)
     try:
         _ui_open_summary(page, config)
         _ui_summarize(page, "Item")
@@ -3259,7 +3277,8 @@ def check_move_to_not_found(page, config, folder=None) -> bool:
             _check_moved_rows(ck, group, moved, rows_after, completer, row_rules)
     except Exception as e:
         ck.error(group, choice, e)
-    path = _ui_write_report(ck, folder, config, name=f"Unverified_{_key(choice)}.xlsx")
+    path = save_to_run_report(config, ck.rows) or _ui_write_report(ck, folder, config,
+                                                                   name=f"Unverified_{_key(choice)}.xlsx")
     counts = Counter(r["Status"] for r in ck.rows)
     print("\n" + "=" * 70 + f"\n  UNVERIFIED ITEMS: {choice.upper()} — {audit}\n" + "=" * 70)
     print(f"  {dict(counts)}   report: {path}")
@@ -3269,16 +3288,18 @@ def check_move_to_not_found(page, config, folder=None) -> bool:
 # ----------------------------------------------------------------------
 # entry point
 # ----------------------------------------------------------------------
-def validate_summary_ui(page, config, folder=None) -> bool:
+def validate_summary_ui(page, config, folder=None, label="UI") -> bool:
     """Validate the Audit Summary page of config.ap_audit_name from the UI against the data block above.
-    Read-only: nothing that changes the audit is clicked. Writes Summary_UI_Validation.xlsx into folder
-    (default: a new Summary_UI_<audit>_<time> folder in config.e2e_output_dir, the report folder)."""
+    Read-only: nothing that changes the audit is clicked. In an Audit.py run the checks go into the run
+    workbook (audit/run_report.py), and the downloaded export, PDFs and FAIL screenshots go straight into the
+    run folder named Summary_<label>_...; run on its own, all of it (plus Summary_UI_Validation.xlsx) goes into
+    a new Summary_<label>_<audit>_<time> folder in config.e2e_output_dir."""
     audit = config.ap_audit_name
-    folder = folder or os.path.join(getattr(config, "e2e_output_dir", os.getcwd()),
-                                    f"Summary_UI_{audit}_{datetime.now():%m%d_%H%M}")
+    folder, prefix = (folder, "") if folder else run_files(config, f"Summary_{label}")
     os.makedirs(folder, exist_ok=True)
     section(f"AUDIT SUMMARY UI VALIDATION  >  {audit}")
-    ck, st = _UIChecks(page, folder), {"audit": audit, "config": config, "prices": {}, "sheets": {}, "export_path": None}
+    ck, st = _UIChecks(page, folder, prefix), {"audit": audit, "config": config, "prices": {}, "sheets": {},
+                                               "export_path": None}
     try:
         st["tab"], st["list_row"] = _ui_open_summary(page, config)
         _ui_summarize(page, "Item")
@@ -3293,11 +3314,11 @@ def validate_summary_ui(page, config, folder=None) -> bool:
         print(f"   read: {len(st['rows'])} row(s), chips={dict(st['chips'])}, status={st['status']}")
     except Exception as e:
         ck.error("Audit Summary", "open and read the page", e)
-        path = _ui_write_report(ck, folder, config)
+        path = save_to_run_report(config, ck.rows) or _ui_write_report(ck, folder, config)
         print(f"   report: {path}")
         return False
     try:
-        st["export_path"], st["sheets"] = _ui_export(page, folder)
+        st["export_path"], st["sheets"] = _ui_export(page, folder, prefix)
         st["prices"] = _ui_prices(st["sheets"])
     except Exception as e:
         ck.error("Actions", "Export download", e)
@@ -3315,7 +3336,7 @@ def validate_summary_ui(page, config, folder=None) -> bool:
             fn()
         except Exception as e:
             ck.error(group, "checks of this group", e)
-    path = _ui_write_report(ck, folder, config)
+    path = save_to_run_report(config, ck.rows) or _ui_write_report(ck, folder, config)
     counts = Counter(r["Status"] for r in ck.rows)
     print("\n" + "=" * 70 + f"\n  AUDIT SUMMARY UI VALIDATION — {audit}\n" + "=" * 70)
     print(f"  {dict(counts)}   report: {path}")
